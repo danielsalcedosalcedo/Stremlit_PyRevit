@@ -813,9 +813,9 @@ else:
 
     # Obtener lista de actividades/partidas disponibles
     lista_act = []
-    if st.session_state.avance_semanal is not None:
+    if "Semanal" in frecuencia_vista and st.session_state.avance_semanal is not None:
         lista_act = obtener_lista_actividades(st.session_state.avance_semanal)
-    elif st.session_state.avance_diario is not None:
+    elif "Diaria" in frecuencia_vista and st.session_state.avance_diario is not None:
         lista_act = obtener_lista_actividades(st.session_state.avance_diario)
 
     opciones_partidas = ["— Todas las partidas (Global) —"] + lista_act
