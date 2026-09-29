@@ -97,16 +97,17 @@ def _first_existing(paths: tuple[Path, ...]) -> Path | None:
 def _load_local_data(
     excel_path: str | None,
     excel_mtime: float,
-    pyrevit_path: str | None,
-    pyrevit_mtime: float,
+    pyrevit_paths: tuple[str, ...],
+    pyrevit_mtimes: tuple[float, ...],
 ) -> dict:
     """Lee las fuentes fijas y renueva la caché cuando cambia su fecha de modificación."""
-    del excel_mtime, pyrevit_mtime  # Se conservan como parte de la clave de caché.
+    del excel_mtime, pyrevit_mtimes  # Se conservan como parte de la clave de caché.
     result = {
         "df_datos": None,
         "avance_semanal": None,
         "avance_diario": None,
         "df_pyrevit": None,
+        "pyrevit_path": None,
         "errores": [],
     }
 
@@ -121,14 +122,39 @@ def _load_local_data(
         except Exception as exc:
             result["errores"].append(f"No se pudo leer el Excel programado: {exc}")
 
-    if pyrevit_path:
+    if pyrevit_paths:
+        errores_pyrevit = []
         try:
-            if pyrevit_path.lower().endswith(".csv"):
-                result["df_pyrevit"] = load_pyrevit_csv(pyrevit_path)
-            else:
-                result["df_pyrevit"] = load_pyrevit_json(pyrevit_path)
+            for pyrevit_path in pyrevit_paths:
+                try:
+                    if pyrevit_path.lower().endswith(".csv"):
+                        df_pyrevit = load_pyrevit_csv(pyrevit_path)
+                    else:
+                        df_pyrevit = load_pyrevit_json(pyrevit_path)
+
+                    if df_pyrevit.empty:
+                        errores_pyrevit.append(f"{pyrevit_path}: el archivo no contiene registros.")
+                        continue
+                    if "assembly_code" not in df_pyrevit.columns:
+                        errores_pyrevit.append(f"{pyrevit_path}: falta la columna assembly_code.")
+                        continue
+
+                    result["df_pyrevit"] = df_pyrevit
+                    result["pyrevit_path"] = pyrevit_path
+                    break
+                except Exception as exc:
+                    errores_pyrevit.append(f"{pyrevit_path}: {exc}")
         except Exception as exc:
-            result["errores"].append(f"No se pudo leer el archivo PyRevit: {exc}")
+            errores_pyrevit.append(str(exc))
+
+        if result["df_pyrevit"] is None:
+            result["errores"].append(
+                "No se pudo cargar una exportación BIM válida. " + " | ".join(errores_pyrevit)
+            )
+    else:
+        result["errores"].append(
+            "No se encontró ningún archivo de exportación PyRevit en las rutas del repositorio."
+        )
 
     return result
 
@@ -249,13 +275,16 @@ def _activity_choices(planned_data: dict, df_datos: pd.DataFrame | None) -> list
 
 
 excel_file = _first_existing(EXCEL_CANDIDATES)
-pyrevit_file = _first_existing(PYREVIT_CANDIDATES)
+pyrevit_files = tuple(
+    path for path in PYREVIT_CANDIDATES if path.is_file() and path.stat().st_size > 0
+)
 loaded = _load_local_data(
     str(excel_file) if excel_file else None,
     excel_file.stat().st_mtime if excel_file else 0.0,
-    str(pyrevit_file) if pyrevit_file else None,
-    pyrevit_file.stat().st_mtime if pyrevit_file else 0.0,
+    tuple(str(path) for path in pyrevit_files),
+    tuple(path.stat().st_mtime for path in pyrevit_files),
 )
+pyrevit_file = Path(loaded["pyrevit_path"]) if loaded["pyrevit_path"] else None
 
 with st.sidebar:
     st.markdown("<div style='font-size:.68rem;font-weight:700;letter-spacing:.14em;color:#00A0E3;text-transform:uppercase'>Datos del proyecto</div>", unsafe_allow_html=True)
@@ -293,10 +322,15 @@ raw_pyrevit = loaded["df_pyrevit"]
 if raw_pyrevit is None or raw_pyrevit.empty:
     st.error("No hay datos BIM para mostrar. La aplicación no tiene carga manual: verifica la exportación automática en la carpeta data.")
     st.markdown(
-        '<div class="info-box">Archivo esperado: <b>data/pyrevit_elementos_detallados.json</b> '
-        'o <b>Aplicacion_pyRevit/data/pyrevit_elementos_detallados.json</b>.</div>',
+        '<div class="info-box">Incluye y confirma en GitHub una exportación con registros en '
+        '<b>data/pyrevit_elementos_detallados.json</b>, '
+        '<b>Aplicacion_pyRevit/data/pyrevit_elementos_detallados.json</b> o '
+        '<b>data/pyrevit_elementos_detallados.csv</b>. Luego reinicia la app para que Streamlit Cloud '
+        'descargue el último commit.</div>',
         unsafe_allow_html=True,
     )
+    with st.expander("Rutas BIM revisadas"):
+        st.code("\n".join(str(path.relative_to(ROOT_DIR)) for path in PYREVIT_CANDIDATES))
     st.stop()
 
 if "assembly_code" not in raw_pyrevit.columns:
