@@ -123,40 +123,84 @@ def load_avance_diario(file) -> dict:
         ws = wb["Avance Diario"]
 
         all_rows = list(ws.iter_rows(values_only=True))
-        fechas_row = all_rows[1]
-        fechas = [f for f in fechas_row[5:] if f is not None]
+        fechas_row = all_rows[1] if len(all_rows) > 1 else ()
 
-        actividades  = {}
-        current_act  = None
+        # Localiza las columnas de fecha reales. En el formato actual del libro,
+        # el calendario comienza después de ITEM, actividad, fechas/duración y tipo.
+        date_indices = []
+        fechas = []
+        for idx, value in enumerate(fechas_row):
+            if isinstance(value, (int, float)) or value is None:
+                continue
+            parsed_date = pd.to_datetime(value, errors="coerce")
+            if pd.notna(parsed_date):
+                date_indices.append(idx)
+                fechas.append(parsed_date)
 
+        actividades = {}
+        current_act = None
         for row in all_rows[2:]:
-            act_name = row[0]
-            tipo     = str(row[4]).strip() if row[4] else ""
-            valores  = list(row[5:])
+            # El tipo de avance está rotulado en la misma fila (p.ej. "Avance acumulado %").
+            tipo_idx = next(
+                (i for i, value in enumerate(row)
+                 if isinstance(value, str)
+                 and ("parcial" in value.lower() or "acumulado" in value.lower())),
+                None,
+            )
+            tipo = str(row[tipo_idx]).strip().lower() if tipo_idx is not None else ""
+
+            # Admite ambos formatos encontrados: actividad en A (antiguo) o en B
+            # con ITEM en A (formato actual). Excluye fechas y datos numéricos.
+            limite_nombre = tipo_idx if tipo_idx is not None else len(row)
+            nombre_candidatos = []
+            for value in row[:limite_nombre]:
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                if pd.notna(pd.to_datetime(value, errors="coerce")):
+                    continue
+                nombre_candidatos.append(value.strip())
+            act_name = nombre_candidatos[-1] if nombre_candidatos else None
 
             if act_name:
-                current_act = str(act_name).strip()
+                current_act = act_name
+                item_val = row[0] if row and isinstance(row[0], (str, int, float)) else ""
+                fechas_fila = [
+                    pd.to_datetime(value, errors="coerce")
+                    for value in row[:limite_nombre]
+                    if value is not None and not isinstance(value, str)
+                    and pd.notna(pd.to_datetime(value, errors="coerce"))
+                ]
+                # Evita que la fila acumulada reinicie la actividad y conserva ITEM
+                # como metadato para posteriores vínculos por código.
                 actividades[current_act] = {
-                    "inicio":    row[1],
-                    "fin":       row[2],
-                    "dias":      row[3],
-                    "parcial":   [],
-                    "acumulado": []
+                    "item": str(item_val).strip() if item_val is not None else "",
+                    "inicio": fechas_fila[0] if fechas_fila else None,
+                    "fin": fechas_fila[1] if len(fechas_fila) > 1 else None,
+                    "dias": next(
+                        (value for value in row[:limite_nombre]
+                         if isinstance(value, (int, float))), None
+                    ),
+                    "parcial": [0.0] * len(fechas),
+                    "acumulado": [0.0] * len(fechas),
                 }
 
-            if current_act is None:
+            if current_act is None or tipo_idx is None:
                 continue
 
-            # Conversión segura: ignora strings inesperados en columnas de datos
-            vals = [
-                float(pd.to_numeric(v, errors="coerce") or 0.0)
-                if v is not None else 0.0
-                for v in valores[:len(fechas)]
-            ]
+            # Mantiene la correspondencia exacta fecha-valor, incluso si hay
+            # columnas de identificación o celdas vacías antes del calendario.
+            if date_indices:
+                raw_values = [row[i] if i < len(row) else None for i in date_indices]
+            else:
+                raw_values = list(row[tipo_idx + 1:tipo_idx + 1 + len(fechas)])
+            vals = []
+            for value in raw_values:
+                number = pd.to_numeric(value, errors="coerce")
+                vals.append(0.0 if pd.isna(number) else float(number))
 
-            if "parcial" in tipo.lower():
+            if "parcial" in tipo:
                 actividades[current_act]["parcial"] = vals
-            elif "acumulado" in tipo.lower():
+            elif "acumulado" in tipo:
                 actividades[current_act]["acumulado"] = vals
 
         return {"fechas": fechas, "actividades": actividades}
