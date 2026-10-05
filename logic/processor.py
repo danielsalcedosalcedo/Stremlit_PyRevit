@@ -105,21 +105,21 @@ def extraer_unidad_y_cantidad_de_desc(assembly_desc, m2=0.0, m3=0.0, ml=0.0, def
 
     # Patrones para m2
     if any(pat in d for pat in ["m2", "m²", "sqm", "metro cuadrado", "metros cuadrados"]):
-        return "m2", m2 if m2 > 0 else (m3 if m3 > 0 else (ml if ml > 0 else default_qty))
+        return "m2", m2
 
     # Patrones para m3
     if any(pat in d for pat in ["m3", "m³", "cum", "metro cubico", "metros cubicos", "metro cúbico", "metros cúbicos"]):
-        return "m3", m3 if m3 > 0 else (m2 if m2 > 0 else (ml if ml > 0 else default_qty))
+        return "m3", m3
 
     # Patrones para ml (metros lineales)
     if any(pat in d for pat in ["ml", "m.l", "linear", "metro lineal", "metros lineales"]):
-        return "ml", ml if ml > 0 else (m2 if m2 > 0 else (m3 if m3 > 0 else default_qty))
+        return "ml", ml
 
     # Patrones para unidad / conteo
-    if any(pat in d for pat in ["ud", "unid", "unidades", "unidad", "pza", "piezas", "stk"]):
+    if re.search(r"\b(?:un|ud|unid|unidad|unidades|pza|piezas|stk)\b", d):
         return "unid", default_qty
 
-    # Fallback por geometría si no hay unidad explícita en la descripción:
+    # Fallback por geometría si no hay unidad explícita en la descripción.
     if m3 > 0:
         return "m3", m3
     elif m2 > 0:
@@ -128,6 +128,62 @@ def extraer_unidad_y_cantidad_de_desc(assembly_desc, m2=0.0, m3=0.0, ml=0.0, def
         return "ml", ml
     else:
         return "unid", default_qty
+
+
+def detectar_unidad_pyrevit(grupo: pd.DataFrame) -> str:
+    """Determina la unidad de una partida sin mezclar magnitudes."""
+    descripcion = ""
+    if "assembly_description" in grupo.columns:
+        descripciones = grupo["assembly_description"].dropna().astype(str)
+        if not descripciones.empty:
+            descripcion = str(descripciones.mode().iloc[0]).casefold()
+
+    patrones = (
+        ("m2", ("m2", "m²", "sqm", "metro cuadrado", "metros cuadrados")),
+        ("m3", ("m3", "m³", "cum", "metro cubico", "metros cubicos", "metro cúbico", "metros cúbicos")),
+        ("ml", ("ml", "m.l", "linear", "metro lineal", "metros lineales")),
+    )
+    for unidad, valores in patrones:
+        if any(valor in descripcion for valor in valores):
+            return unidad
+    if re.search(r"\b(?:un|ud|unid|unidad|unidades|pza|piezas|stk)\b", descripcion):
+        return "unid"
+
+    if "unidad" in grupo.columns:
+        unidades = grupo["unidad"].dropna().astype(str).str.strip().str.casefold()
+        if not unidades.empty:
+            unidad = unidades.mode().iloc[0].replace("²", "2").replace("³", "3")
+            alias = {
+                "m2": "m2", "sqm": "m2", "m3": "m3", "cum": "m3",
+                "ml": "ml", "m.l": "ml", "unid": "unid", "ud": "unid",
+                "un": "unid", "unidad": "unid", "unidades": "unid",
+                "unit": "unid", "units": "unid", "ea": "unid", "pza": "unid",
+            }
+            if unidad in alias:
+                return alias[unidad]
+
+    for unidad in ("m2", "m3", "ml"):
+        if unidad in grupo.columns:
+            cantidad = pd.to_numeric(grupo[unidad], errors="coerce").fillna(0)
+            if cantidad.sum() > 0:
+                return unidad
+    return "unid"
+
+
+def extraer_cantidad_pyrevit(grupo: pd.DataFrame, unidad: str) -> pd.Series:
+    """Retorna únicamente la magnitud elegida para cada elemento de la partida."""
+    if unidad == "unid":
+        return pd.Series(1.0, index=grupo.index)
+    if unidad in grupo.columns:
+        return pd.to_numeric(grupo[unidad], errors="coerce").fillna(0.0)
+    if "cantidad_total" in grupo.columns and "unidad" in grupo.columns:
+        etiquetas = (
+            grupo["unidad"].astype(str).str.casefold()
+            .str.replace("²", "2").str.replace("³", "3")
+        )
+        if etiquetas.eq(unidad).any():
+            return pd.to_numeric(grupo["cantidad_total"], errors="coerce").fillna(0.0)
+    return pd.Series(0.0, index=grupo.index)
 
 
 def vincular_item_pyrevit(df_datos: pd.DataFrame, df_pyrevit: pd.DataFrame) -> pd.DataFrame:
@@ -193,7 +249,6 @@ def _agrupar_por_assembly_code(df_pyrevit: pd.DataFrame) -> pd.DataFrame:
 
     tiene_ejecutado = "ejecutado" in df_pyrevit.columns
     tiene_cantidad  = "cantidad_total" in df_pyrevit.columns
-    tiene_unidad    = "unidad" in df_pyrevit.columns
     tiene_desc      = "assembly_description" in df_pyrevit.columns
 
     grupos = df_pyrevit.groupby("assembly_code")
@@ -218,34 +273,16 @@ def _agrupar_por_assembly_code(df_pyrevit: pd.DataFrame) -> pd.DataFrame:
             ejec = pd.DataFrame()
             row["elementos_ejecutados"] = 0
 
-        # Si hay columnas de métricas especificas m2/m3/ml, recalcular con respecto a la descripción
+        # Mantener la unidad del montaje, aunque el elemento tenga otras métricas geométricas.
         has_specific_metrics = any(c in grp.columns for c in ["m2", "m3", "ml"])
-        if has_specific_metrics:
-            m2_tot = grp["m2"].sum() if "m2" in grp.columns else 0.0
-            m3_tot = grp["m3"].sum() if "m3" in grp.columns else 0.0
-            ml_tot = grp["ml"].sum() if "ml" in grp.columns else 0.0
-
-            m2_ejec = ejec["m2"].sum() if ("m2" in ejec.columns and not ejec.empty) else 0.0
-            m3_ejec = ejec["m3"].sum() if ("m3" in ejec.columns and not ejec.empty) else 0.0
-            ml_ejec = ejec["ml"].sum() if ("ml" in ejec.columns and not ejec.empty) else 0.0
-
-            u_det, total_qty = extraer_unidad_y_cantidad_de_desc(desc, m2_tot, m3_tot, ml_tot, default_qty=float(len(grp)))
-            _, ejec_qty = extraer_unidad_y_cantidad_de_desc(desc, m2_ejec, m3_ejec, ml_ejec, default_qty=float(len(ejec)))
-
+        if has_specific_metrics or tiene_cantidad:
+            u_det = detectar_unidad_pyrevit(grp)
+            total_qty = float(extraer_cantidad_pyrevit(grp, u_det).sum())
+            ejec_qty = float(extraer_cantidad_pyrevit(ejec, u_det).sum())
             row["unidad"] = u_det
             row["cantidad_total_revit"] = round(total_qty, 3)
             row["cantidad_ejecutada"]   = round(ejec_qty, 3)
             row["pct_ejecutado"] = round(ejec_qty / total_qty * 100, 2) if total_qty > 0 else 0.0
-        elif tiene_cantidad:
-            total_qty = grp["cantidad_total"].sum()
-            ejec_qty  = ejec["cantidad_total"].sum() if not ejec.empty else 0.0
-            row["cantidad_total_revit"] = round(total_qty, 3)
-            row["cantidad_ejecutada"]   = round(ejec_qty, 3)
-            row["pct_ejecutado"] = round(ejec_qty / total_qty * 100, 2) if total_qty > 0 else 0.0
-            if tiene_unidad:
-                row["unidad"] = grp["unidad"].mode().iloc[0] if not grp["unidad"].mode().empty else "-"
-            else:
-                row["unidad"] = "-"
         else:
             row["cantidad_total_revit"] = 0.0
             row["cantidad_ejecutada"]   = 0.0
@@ -317,6 +354,7 @@ def calcular_comparativo_cantidades_periodo(
     frecuencia: str,
     fecha_corte: pd.Timestamp,
     actividad: str | None = None,
+    unidad: str | None = None,
 ) -> pd.DataFrame:
     """Distribuye cada cantidad BIM entre los días hábiles de su actividad."""
     if planned_curve.empty:
@@ -352,19 +390,12 @@ def calcular_comparativo_cantidades_periodo(
             if matching_elements.empty or not workdays:
                 continue
 
-            quantity_column = _detectar_columna_cantidad(matching_elements)
-            if quantity_column is None:
+            item_unit = unidad or detectar_unidad_pyrevit(matching_elements)
+            if item_unit not in {"m2", "m3", "ml", "unid"}:
                 continue
-            quantity_unit = {
-                "m2": "m2",
-                "m3": "m3",
-                "ml": "ml",
-                "cantidad_total": "unidades",
-            }[quantity_column]
+            quantity_unit = "unidades" if item_unit == "unid" else item_unit
             quantity_total = float(
-                pd.to_numeric(matching_elements[quantity_column], errors="coerce")
-                .fillna(0)
-                .sum()
+                extraer_cantidad_pyrevit(matching_elements, item_unit).sum()
             )
             quantity_per_day = quantity_total / len(workdays)
             for workday in workdays:
@@ -380,6 +411,7 @@ def calcular_comparativo_cantidades_periodo(
                 matching_elements,
                 frecuencia="D",
                 fecha_corte=fecha_corte,
+                unidad=item_unit,
             )
             for _, row in real_item.iterrows():
                 day = pd.to_datetime(row["fecha"], errors="coerce")
@@ -593,6 +625,7 @@ def generar_reporte_diario_partidas(
             item,
             frecuencia="D",
             fecha_corte=end_date,
+            unidad=detectar_unidad_pyrevit(item),
         )
         if not actual_curve.empty:
             for _, row in actual_curve.iterrows():
@@ -629,7 +662,8 @@ def generar_reporte_diario_partidas(
 def calcular_curva_s_real_pyrevit(df_pyrevit: pd.DataFrame,
                                    df_datos: pd.DataFrame = None,
                                    frecuencia: str = "D",
-                                   fecha_corte: pd.Timestamp = None) -> pd.DataFrame:
+                                   fecha_corte: pd.Timestamp = None,
+                                   unidad: str = None) -> pd.DataFrame:
     """
     Genera la Curva S real desde PyRevit.
 
@@ -639,22 +673,46 @@ def calcular_curva_s_real_pyrevit(df_pyrevit: pd.DataFrame,
     Parámetros:
       frecuencia: "D" = diario, "W" = semanal (fin de semana)
       fecha_corte: filtra hasta esta fecha inclusive
+      unidad: categoría BIM para una curva global homogénea.
     """
     if df_pyrevit is None or df_pyrevit.empty:
         return pd.DataFrame()
     if "ejecutado" not in df_pyrevit.columns:
         return pd.DataFrame()
 
-    # Detectar columna de cantidad ANTES de filtrar (con todos los elementos)
-    col_qty = _detectar_columna_cantidad(df_pyrevit)
-    if col_qty is None:
-        return pd.DataFrame()
+    if unidad is not None:
+        if unidad not in {"m2", "m3", "ml", "unid"}:
+            raise ValueError(f"Unidad de curva no soportada: {unidad}")
+        if "assembly_code" not in df_pyrevit.columns:
+            return pd.DataFrame()
+        grupos = []
+        for _, grupo in df_pyrevit.groupby("assembly_code", dropna=True):
+            unidad_grupo = detectar_unidad_pyrevit(grupo)
+            if unidad_grupo != unidad:
+                continue
+            grupo_medible = grupo.copy()
+            grupo_medible["_cantidad_curva"] = extraer_cantidad_pyrevit(
+                grupo, unidad
+            )
+            grupos.append(grupo_medible)
+        if not grupos:
+            return pd.DataFrame()
+        df_medicion = pd.concat(grupos)
+        columna_cantidad = "_cantidad_curva"
+    else:
+        columna_cantidad = _detectar_columna_cantidad(df_pyrevit)
+        if columna_cantidad is None:
+            return pd.DataFrame()
+        df_medicion = df_pyrevit
 
-    # Total de referencia = TODOS los elementos de la partida (ejecutados + no ejecutados)
-    total_ref = float(df_pyrevit[col_qty].sum())
+    # El denominador incluye todos los elementos del alcance y la unidad elegida.
+    total_ref = float(
+        pd.to_numeric(df_medicion[columna_cantidad], errors="coerce")
+        .fillna(0).sum()
+    )
 
     # Filtrar solo ejecutados
-    df_ejec = df_pyrevit[df_pyrevit["ejecutado"] == True].copy()
+    df_ejec = df_medicion[df_medicion["ejecutado"] == True].copy()
     if df_ejec.empty:
         return pd.DataFrame()
 
@@ -685,7 +743,7 @@ def calcular_curva_s_real_pyrevit(df_pyrevit: pd.DataFrame,
     # Agrupar por período usando la columna de cantidad correcta
     agrupado = df_ejec.groupby(
         pd.Grouper(key="fecha", freq=frecuencia)
-    )[col_qty].sum().reset_index()
+    )[columna_cantidad].sum().reset_index()
     agrupado.columns = ["fecha", "cantidad_ejecutada_periodo"]
 
     agrupado = agrupado[agrupado["cantidad_ejecutada_periodo"] > 0]
