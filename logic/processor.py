@@ -311,23 +311,54 @@ def calcular_cantidad_referencia_pyrevit(df_pyrevit: pd.DataFrame) -> float:
 def calcular_comparativo_cantidades_periodo(
     planned_curve: pd.DataFrame,
     real_curve: pd.DataFrame,
-    total_quantity: float,
+    df_pyrevit: pd.DataFrame,
+    actividades_programadas: dict[str, dict],
+    codigos_actividad: dict[str, str],
     frecuencia: str,
     fecha_corte: pd.Timestamp,
+    actividad: str | None = None,
 ) -> pd.DataFrame:
-    """Alinea cantidades planificadas y reales en los períodos de la curva."""
+    """Distribuye cada cantidad BIM entre los días hábiles de su actividad."""
     if planned_curve.empty:
         return pd.DataFrame()
 
-    planned = planned_curve.copy()
-    progress = pd.to_numeric(planned["acumulado"], errors="coerce").fillna(0)
-    planned["cantidad_programada"] = (
-        progress.diff().fillna(progress).clip(lower=0) * total_quantity / 100
-    )
+    scheduled_days_by_code: dict[str, list[pd.Timestamp]] = {}
+    for name, details in actividades_programadas.items():
+        if actividad and name != actividad:
+            continue
+
+        code = str(codigos_actividad.get(name) or details.get("item") or "").strip()
+        if not code:
+            continue
+
+        start = pd.to_datetime(details.get("inicio"), errors="coerce")
+        duration_value = pd.to_numeric(details.get("dias"), errors="coerce")
+        if pd.isna(start) or pd.isna(duration_value) or duration_value <= 0:
+            continue
+
+        duration = int(round(float(duration_value)))
+        if duration <= 0:
+            continue
+        workdays = pd.bdate_range(start=start.normalize(), periods=duration)
+        scheduled_days_by_code.setdefault(code, []).extend(workdays.tolist())
+
+    planned_by_date: dict[pd.Timestamp, float] = {}
+    if "assembly_code" in df_pyrevit.columns:
+        assembly_codes = df_pyrevit["assembly_code"].astype(str).str.strip()
+        for code, workdays in scheduled_days_by_code.items():
+            matching_elements = df_pyrevit.loc[assembly_codes == code]
+            if matching_elements.empty or not workdays:
+                continue
+
+            quantity_per_day = calcular_cantidad_referencia_pyrevit(matching_elements) / len(workdays)
+            for workday in workdays:
+                day = pd.Timestamp(workday).normalize()
+                planned_by_date[day] = planned_by_date.get(day, 0.0) + quantity_per_day
 
     if frecuencia == "D":
-        periods = pd.to_datetime(planned["fecha"], errors="coerce").dt.normalize()
+        periods = pd.to_datetime(planned_curve["fecha"], errors="coerce").dt.normalize()
         period_labels = periods.dt.strftime("%d-%m-%Y")
+        planned_amounts = [planned_by_date.get(period, 0.0) for period in periods]
         actual_by_date = {}
         if not real_curve.empty:
             actual_dates = pd.to_datetime(real_curve["fecha"], errors="coerce").dt.normalize()
@@ -342,7 +373,9 @@ def calcular_comparativo_cantidades_periodo(
             "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12,
         }
         bounds = []
-        for week_range in planned.get("semana_rango", pd.Series("", index=planned.index)):
+        for week_range in planned_curve.get(
+            "semana_rango", pd.Series("", index=planned_curve.index)
+        ):
             match = re.search(
                 r"(\d{1,2})-([a-zñ]{3})\s+al\s+(\d{1,2})-([a-zñ]{3})",
                 str(week_range).lower(),
@@ -370,6 +403,13 @@ def calcular_comparativo_cantidades_periodo(
                 pd.Timestamp(end_year, end_month_num, int(end_day)),
             ))
 
+        planned_amounts = [0.0] * len(bounds)
+        for day, quantity in planned_by_date.items():
+            for index, (start, end) in enumerate(bounds):
+                if start is not None and start <= day <= end:
+                    planned_amounts[index] += quantity
+                    break
+
         actual_by_period = [0.0] * len(bounds)
         if not real_curve.empty:
             actual_dates = pd.to_datetime(real_curve["fecha"], errors="coerce").dt.normalize()
@@ -384,11 +424,11 @@ def calcular_comparativo_cantidades_periodo(
                         actual_by_period[index] += float(amount)
                         break
         actual = actual_by_period
-        period_labels = planned["semana_label"].astype(str)
+        period_labels = planned_curve["semana_label"].astype(str)
 
     return pd.DataFrame({
         "periodo": period_labels,
-        "cantidad_programada": planned["cantidad_programada"].round(2),
+        "cantidad_programada": pd.Series(planned_amounts).round(2),
         "cantidad_real": actual,
     })
 
