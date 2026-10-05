@@ -2,6 +2,9 @@
 # Gráficos Matplotlib para Curvas S – con integración PyRevit por Assembly Code
 # Desarrollado por Daniel Salcedo - Coordinador BIM
 
+import re
+from datetime import date, timedelta
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -506,6 +509,93 @@ def _alinear_real_con_semanas(df_prog: pd.DataFrame, df_real: pd.DataFrame):
     return x_real, y_real
 
 
+def _current_week_label(df_prog: pd.DataFrame, today: date) -> str | None:
+    if "semana_rango" not in df_prog.columns or "semana_label" not in df_prog.columns:
+        return None
+
+    months = {
+        "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+        "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12,
+    }
+    month_range_pattern = re.compile(
+        r"(\d{1,2})-([a-zñ]+)\s+al\s+(\d{1,2})-([a-zñ]+)"
+    )
+    date_pattern = re.compile(r"\d{1,4}[./-]\d{1,2}[./-]\d{2,4}")
+    numeric_range_pattern = re.compile(
+        r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?"
+        r"\s+(?:al|a|hasta|to)\s+"
+        r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?"
+    )
+    for _, row in df_prog.iterrows():
+        week_range = str(row["semana_rango"]).lower()
+        month_range = month_range_pattern.search(week_range)
+        if month_range:
+            start_day, start_month, end_day, end_month = month_range.groups()
+            start_month_num = months.get(start_month[:3])
+            end_month_num = months.get(end_month[:3])
+            if start_month_num is not None and end_month_num is not None:
+                start_year = today.year
+                start = pd.to_datetime(
+                    f"{start_year}-{start_month_num}-{start_day}", errors="coerce"
+                )
+                if pd.notna(start) and start.date() > today + timedelta(days=180):
+                    start_year -= 1
+                elif pd.notna(start) and start.date() < today - timedelta(days=180):
+                    start_year += 1
+                end_year = start_year + (1 if end_month_num < start_month_num else 0)
+                start = pd.to_datetime(f"{start_year}-{start_month_num}-{start_day}", errors="coerce")
+                end = pd.to_datetime(
+                    f"{end_year}-{end_month_num}-{end_day}", errors="coerce"
+                )
+                if pd.notna(start) and pd.notna(end) and start.date() <= today <= end.date():
+                    return str(row["semana_label"])
+
+        numeric_range = numeric_range_pattern.search(week_range)
+        if numeric_range:
+            start_day, start_month, start_year, end_day, end_month, end_year = (
+                numeric_range.groups()
+            )
+            start_month_num = int(start_month)
+            end_month_num = int(end_month)
+            resolved_start_year = int(start_year) if start_year else today.year
+            if len(start_year or "") == 2:
+                resolved_start_year += 2000
+            if not start_year:
+                start = pd.to_datetime(
+                    f"{resolved_start_year}-{start_month_num}-{start_day}",
+                    errors="coerce",
+                )
+                if pd.notna(start) and start.date() > today + timedelta(days=180):
+                    resolved_start_year -= 1
+                elif pd.notna(start) and start.date() < today - timedelta(days=180):
+                    resolved_start_year += 1
+            resolved_end_year = int(end_year) if end_year else (
+                resolved_start_year + (1 if end_month_num < start_month_num else 0)
+            )
+            if len(end_year or "") == 2:
+                resolved_end_year += 2000
+            start = pd.to_datetime(
+                f"{resolved_start_year}-{start_month_num}-{start_day}",
+                errors="coerce",
+            )
+            end = pd.to_datetime(
+                f"{resolved_end_year}-{end_month_num}-{end_day}",
+                errors="coerce",
+            )
+            if pd.notna(start) and pd.notna(end) and start.date() <= today <= end.date():
+                return str(row["semana_label"])
+
+        date_strings = date_pattern.findall(week_range)
+        dates = pd.to_datetime(date_strings, errors="coerce", dayfirst=True)
+        dates = dates[~pd.isna(dates)]
+        if len(dates) >= 2 and dates[0].date() <= today <= dates[1].date():
+            return str(row["semana_label"])
+        if len(dates) == 1 and dates[0].date() <= today <= (dates[0] + pd.Timedelta(days=6)).date():
+            return str(row["semana_label"])
+
+    return None
+
+
 def grafico_curva_s_semanal_plotly(df_prog: pd.DataFrame,
                                     titulo: str = "Curva S – Avance Semanal Programado vs Real",
                                     df_real_pyrevit: pd.DataFrame = None) -> go.Figure:
@@ -525,6 +615,7 @@ def grafico_curva_s_semanal_plotly(df_prog: pd.DataFrame,
             marker=dict(size=7, color=C["programado"]),
             fill="tozeroy",
             fillcolor="rgba(0, 119, 182, 0.10)",
+            hovertemplate="%{x}<br>%{y:.1f}%<extra>%{fullData.name}</extra>",
         )
     )
 
@@ -543,11 +634,25 @@ def grafico_curva_s_semanal_plotly(df_prog: pd.DataFrame,
                 marker=dict(size=8, symbol="square", color=C["real"]),
                 fill="tozeroy",
                 fillcolor="rgba(0, 160, 227, 0.10)",
+                hovertemplate="%{x}<br>%{y:.1f}%<extra>%{fullData.name}</extra>",
             )
         )
 
     _apply_plotly_layout(fig, titulo)
-    fig.update_yaxes(title_text="Avance Acumulado %", range=[-5, 115])
+    fig.update_yaxes(title_text="Avance Acumulado %", range=[-5, 115], tickformat=".1f")
+    current_week = _current_week_label(df_prog, date.today())
+    if current_week is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[current_week, current_week],
+                y=[-5, 115],
+                mode="lines",
+                name="Semana actual",
+                line=dict(color=C["alerta"], width=2, dash="dash"),
+                hoverinfo="skip",
+                showlegend=True,
+            )
+        )
     return fig
 
 
@@ -572,6 +677,7 @@ def grafico_curva_s_diaria_plotly(df_prog: pd.DataFrame,
             marker=dict(size=6, color=C["programado"]),
             fill="tozeroy",
             fillcolor="rgba(0, 119, 182, 0.10)",
+            hovertemplate="%{x|%d-%m-%Y}<br>%{y:.1f}%<extra>%{fullData.name}</extra>",
         )
     )
 
@@ -591,12 +697,38 @@ def grafico_curva_s_diaria_plotly(df_prog: pd.DataFrame,
                 marker=dict(size=7, symbol="square", color=C["real"]),
                 fill="tozeroy",
                 fillcolor="rgba(0, 160, 227, 0.10)",
+                hovertemplate="%{x|%d-%m-%Y}<br>%{y:.1f}%<extra>%{fullData.name}</extra>",
             )
         )
 
     _apply_plotly_layout(fig, titulo)
     fig.update_xaxes(tickformat="%d-%m-%Y")
-    fig.update_yaxes(title_text="Avance Acumulado %", range=[-5, 115])
+    fig.update_yaxes(title_text="Avance Acumulado %", range=[-5, 115], tickformat=".1f")
+    today = pd.Timestamp(date.today())
+    all_dates = pd.concat([fechas, fechas_r], ignore_index=True) if (
+        df_real_pyrevit is not None
+        and not df_real_pyrevit.empty
+        and "pct_ejecutado_acum" in df_real_pyrevit.columns
+    ) else fechas
+    all_dates = all_dates.dropna()
+    if not all_dates.empty:
+        fig.update_xaxes(
+            range=[
+                min(all_dates.min(), today),
+                max(all_dates.max(), today),
+            ]
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=[today, today],
+            y=[-5, 115],
+            mode="lines",
+            name="Día actual",
+            line=dict(color=C["alerta"], width=2, dash="dash"),
+            hoverinfo="skip",
+            showlegend=True,
+        )
+    )
     return fig
 
 
