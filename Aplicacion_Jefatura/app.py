@@ -36,7 +36,8 @@ from logic.processor import (  # noqa: E402
     calcular_curva_s_diaria,
     calcular_curva_s_real_pyrevit,
     calcular_curva_s_semanal,
-    extraer_unidad_y_cantidad_de_desc,
+    detectar_unidad_pyrevit,
+    extraer_cantidad_pyrevit,
     generar_reporte_diario_partidas,
 )
 
@@ -205,19 +206,9 @@ def _build_item_summary(df: pd.DataFrame) -> pd.DataFrame:
 
         executed = group["ejecutado"].fillna(False).astype(bool) if "ejecutado" in group else pd.Series(False, index=group.index)
         done = group.loc[executed]
-        m2_total = pd.to_numeric(group.get("m2", pd.Series(0, index=group.index)), errors="coerce").fillna(0).sum()
-        m3_total = pd.to_numeric(group.get("m3", pd.Series(0, index=group.index)), errors="coerce").fillna(0).sum()
-        ml_total = pd.to_numeric(group.get("ml", pd.Series(0, index=group.index)), errors="coerce").fillna(0).sum()
-        m2_done = pd.to_numeric(done.get("m2", pd.Series(0, index=done.index)), errors="coerce").fillna(0).sum()
-        m3_done = pd.to_numeric(done.get("m3", pd.Series(0, index=done.index)), errors="coerce").fillna(0).sum()
-        ml_done = pd.to_numeric(done.get("ml", pd.Series(0, index=done.index)), errors="coerce").fillna(0).sum()
-
-        unit, total = extraer_unidad_y_cantidad_de_desc(
-            description, m2_total, m3_total, ml_total, default_qty=float(len(group))
-        )
-        _, quantity_done = extraer_unidad_y_cantidad_de_desc(
-            description, m2_done, m3_done, ml_done, default_qty=float(len(done))
-        )
+        unit = detectar_unidad_pyrevit(group)
+        total = float(extraer_cantidad_pyrevit(group, unit).sum())
+        quantity_done = float(extraer_cantidad_pyrevit(done, unit).sum())
         pct = min(100.0, quantity_done / total * 100) if total > 0 else 0.0
         rows.append({
             "ITEM": code_text,
@@ -233,6 +224,55 @@ def _build_item_summary(df: pd.DataFrame) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows).sort_values("pct_ejecutado", ascending=True) if rows else pd.DataFrame()
+
+
+def _build_weighted_global_curve(
+    planned_data: dict,
+    activity_choices: list[dict[str, str]],
+    item_summary: pd.DataFrame,
+    unit: str,
+    frequency: str,
+) -> tuple[pd.DataFrame, float, float]:
+    """Calcula el programado global como cantidad BIM programada / cantidad BIM total."""
+    if frequency == "W":
+        curve = calcular_curva_s_semanal(planned_data)
+    else:
+        curve = calcular_curva_s_diaria(planned_data)
+    if curve.empty:
+        return curve, 0.0, 0.0
+
+    unit_items = item_summary[item_summary["Unidad"] == unit]
+    totals_by_code = dict(zip(unit_items["ITEM"], unit_items["Cantidad total"]))
+    total_bim = float(unit_items["Cantidad total"].sum())
+    if total_bim <= 0:
+        return pd.DataFrame(), 0.0, 0.0
+
+    activity_codes = {
+        choice["activity"]: choice["code"]
+        for choice in activity_choices
+        if choice["activity"] in planned_data["actividades"]
+    }
+    weighted_percent = pd.Series(0.0, index=range(len(curve)))
+    scheduled_bim = 0.0
+    weighted_codes: set[str] = set()
+    for activity_name, code_value in activity_codes.items():
+        code = str(code_value).strip()
+        weight = float(totals_by_code.get(code, 0.0))
+        if weight <= 0 or code in weighted_codes:
+            continue
+        percentages = planned_data["actividades"][activity_name].get("acumulado", [])
+        if len(percentages) != len(curve):
+            continue
+        weighted_percent = weighted_percent.add(
+            pd.Series(percentages, dtype="float64") * weight,
+            fill_value=0.0,
+        )
+        scheduled_bim += weight
+        weighted_codes.add(code)
+
+    curve["acumulado"] = (weighted_percent / total_bim).round(2)
+    curve["parcial"] = curve["acumulado"].diff().fillna(curve["acumulado"])
+    return curve, total_bim, scheduled_bim
 
 
 def _normalize_task_name(value: object) -> str:
@@ -436,6 +476,7 @@ if selected_contractor != "Todos" and "ei_subcontratista" in scope.columns:
     scope = scope[scope["ei_subcontratista"].astype(str) == selected_contractor]
 
 as_of = _filtered_as_of(scope, cutoff)
+model_item_summary = _build_item_summary(scope)
 item_summary = _build_item_summary(as_of)
 st.markdown('<div class="section-title">Análisis ejecutivo</div>', unsafe_allow_html=True)
 tab_curve, tab_items = st.tabs(["Curva de avance", "Partidas / códigos"])
@@ -457,7 +498,7 @@ with tab_curve:
             for _, row in item_summary.iterrows()
         ]
     chosen_activity = st.selectbox(
-        "Seleccione la partida a visualizar",
+        "Seleccione partida o vista global",
         options=[None] + activity_choices,
         format_func=lambda option: (
             "Global · Todas las partidas"
@@ -467,38 +508,112 @@ with tab_curve:
         key=f"jefatura_activity_{frequency}",
     )
 
+    unit_labels = {"m2": "m²", "m3": "m³", "ml": "ml", "unid": "unidades"}
+    selected_unit = None
+    if chosen_activity is None:
+        available_units = list(unit_labels)
+        selected_unit = st.selectbox(
+            "Unidad de la curva global",
+            options=available_units,
+            index=available_units.index("m2"),
+            format_func=lambda unit: unit_labels[unit],
+            key=f"jefatura_global_unit_{frequency}",
+            help="Cada curva global considera solo partidas de la unidad elegida.",
+        )
+        unit_total = (
+            float(model_item_summary.loc[
+                model_item_summary["Unidad"] == selected_unit, "Cantidad total"
+            ].sum())
+            if not model_item_summary.empty
+            else 0.0
+        )
+        if unit_total <= 0:
+            st.warning(
+                f"La exportación BIM no contiene cantidades clasificadas como "
+                f"{unit_labels[selected_unit]}; no se puede calcular esa curva."
+            )
+
     curve_scope = scope
     if chosen_activity and chosen_activity["code"]:
         curve_scope = scope[
             scope["assembly_code"].astype(str).str.strip() == chosen_activity["code"]
         ]
-    try:
-        real_curve = calcular_curva_s_real_pyrevit(
-            curve_scope,
-            frecuencia=frequency,
-            fecha_corte=pd.Timestamp(cutoff),
-        )
-    except Exception as exc:
-        real_curve = pd.DataFrame()
-        st.warning(f"No fue posible calcular la curva real: {exc}")
+    elif selected_unit:
+        unit_codes = set(model_item_summary.loc[
+            model_item_summary["Unidad"] == selected_unit, "assembly_code"
+        ].astype(str))
+        curve_scope = scope[
+            scope["assembly_code"].astype(str).str.strip().isin(unit_codes)
+        ]
+
+    curve_unit = selected_unit
+    if chosen_activity and chosen_activity["code"]:
+        matching_summary = model_item_summary.loc[
+            model_item_summary["assembly_code"] == chosen_activity["code"]
+        ]
+        if not matching_summary.empty:
+            curve_unit = matching_summary.iloc[0]["Unidad"]
+
+    real_curve = pd.DataFrame()
+    if chosen_activity is not None or selected_unit:
+        try:
+            real_curve = calcular_curva_s_real_pyrevit(
+                curve_scope,
+                frecuencia=frequency,
+                fecha_corte=pd.Timestamp(cutoff),
+                unidad=curve_unit,
+            )
+        except Exception as exc:
+            st.warning(f"No fue posible calcular la curva real: {exc}")
 
     if planned_data:
         activity = chosen_activity["activity"] if chosen_activity else None
-        if frequency == "W":
+        if chosen_activity is None and selected_unit:
+            planned_curve, total_bim, scheduled_bim = _build_weighted_global_curve(
+                planned_data,
+                activity_choices,
+                model_item_summary,
+                selected_unit,
+                frequency,
+            )
+            if scheduled_bim < total_bim:
+                st.warning(
+                    f"El Excel no tiene actividades vinculadas para "
+                    f"{total_bim - scheduled_bim:,.2f} {unit_labels[selected_unit]} "
+                    "del total BIM; esa cantidad queda incluida en el denominador "
+                    "global, pero no aporta avance programado."
+                )
+        elif chosen_activity is not None and frequency == "W":
             planned_curve = calcular_curva_s_semanal(planned_data, actividad=activity)
-            chart = grafico_curva_s_semanal_plotly(
-                planned_curve,
-                titulo="Curva S · Programado vs. real",
-                df_real_pyrevit=real_curve,
-            )
-        else:
+        elif chosen_activity is not None:
             planned_curve = calcular_curva_s_diaria(planned_data, actividad=activity)
-            chart = grafico_curva_s_diaria_plotly(
-                planned_curve,
-                titulo="Curva diaria · Programado vs. real",
-                df_real_pyrevit=real_curve,
-            )
-        st.plotly_chart(chart, use_container_width=True)
+        else:
+            planned_curve = pd.DataFrame()
+
+        if planned_curve.empty:
+            st.info("No hay una curva programada disponible para la unidad seleccionada.")
+        else:
+            if frequency == "W":
+                chart = grafico_curva_s_semanal_plotly(
+                    planned_curve,
+                    titulo=(
+                        f"Curva S · {unit_labels[selected_unit]} · Programado vs. real"
+                        if chosen_activity is None and selected_unit
+                        else "Curva S · Programado vs. real"
+                    ),
+                    df_real_pyrevit=real_curve,
+                )
+            else:
+                chart = grafico_curva_s_diaria_plotly(
+                    planned_curve,
+                    titulo=(
+                        f"Curva diaria · {unit_labels[selected_unit]} · Programado vs. real"
+                        if chosen_activity is None and selected_unit
+                        else "Curva diaria · Programado vs. real"
+                    ),
+                    df_real_pyrevit=real_curve,
+                )
+            st.plotly_chart(chart, use_container_width=True)
         st.caption("La curva programada se obtiene del Excel fijo del proyecto; la real, de la exportación PyRevit.")
         scheduled_activities = {}
         if loaded["avance_diario"]:
@@ -523,21 +638,48 @@ with tab_curve:
                     if pd.isna(details.get("dias")):
                         details["dias"] = row.get("N° días hábiles (calc.)")
 
-        quantity_comparison = calcular_comparativo_cantidades_periodo(
-            planned_curve,
-            real_curve,
-            curve_scope,
-            scheduled_activities,
-            activity_codes,
-            frequency,
-            pd.Timestamp(cutoff),
-            actividad=chosen_activity["activity"] if chosen_activity else None,
-        )
-        st.markdown("#### Avance por período · Cantidad programada vs. real")
-        st.plotly_chart(
-            grafico_comparativo_cantidades_plotly(quantity_comparison),
-            use_container_width=True,
-        )
+        if chosen_activity is None and selected_unit:
+            selected_activities = {
+                choice["activity"] for choice in activity_choices
+                if choice["code"] in unit_codes
+            }
+            scheduled_activities = {
+                name: details for name, details in scheduled_activities.items()
+                if name in selected_activities
+            }
+            activity_codes = {
+                name: code for name, code in activity_codes.items()
+                if name in selected_activities
+            }
+
+        if not planned_curve.empty:
+            comparison_unit = selected_unit
+            if chosen_activity and chosen_activity["code"]:
+                matching_summary = model_item_summary.loc[
+                    model_item_summary["assembly_code"]
+                    == chosen_activity["code"]
+                ]
+                if not matching_summary.empty:
+                    comparison_unit = matching_summary.iloc[0]["Unidad"]
+            quantity_comparison = calcular_comparativo_cantidades_periodo(
+                planned_curve,
+                real_curve,
+                curve_scope,
+                scheduled_activities,
+                activity_codes,
+                frequency,
+                pd.Timestamp(cutoff),
+                actividad=chosen_activity["activity"] if chosen_activity else None,
+                unidad=comparison_unit,
+            )
+            st.markdown("#### Avance por período · Cantidad programada vs. real")
+            if quantity_comparison.empty:
+                st.info("No hay cantidades comparables para el período y la unidad seleccionados.")
+            else:
+                st.plotly_chart(
+                    grafico_comparativo_cantidades_plotly(quantity_comparison),
+                    use_container_width=True,
+                )
     else:
         if not excel_file:
             st.info("La curva programada aparecerá cuando exista el Excel en data/programado/Demoliciones_Avance.xlsx. La curva real BIM está disponible a continuación.")
@@ -546,7 +688,13 @@ with tab_curve:
         st.plotly_chart(
             grafico_curva_real_pyrevit_plotly(
                 real_curve,
-                titulo=f"Curva real BIM · {frequency_label.lower()} · al {cutoff.strftime('%d-%m-%Y')}",
+                titulo=(
+                    f"Curva real BIM · {unit_labels[selected_unit]} · "
+                    f"{frequency_label.lower()} · al {cutoff.strftime('%d-%m-%Y')}"
+                    if chosen_activity is None and selected_unit
+                    else f"Curva real BIM · {frequency_label.lower()} · al "
+                    f"{cutoff.strftime('%d-%m-%Y')}"
+                ),
             ),
             use_container_width=True,
         )
