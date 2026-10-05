@@ -301,7 +301,7 @@ with st.sidebar:
     if excel_file:
         st.success(f"Programación: {excel_file.name}")
     else:
-        st.info("Sin Excel programado; se mostrarán los indicadores BIM disponibles.")
+        st.info("Sin Excel programado; se mostrarán los datos BIM disponibles.")
 
 safe_project = html.escape(proyecto)
 safe_stage = html.escape(etapa)
@@ -354,49 +354,6 @@ if selected_contractor != "Todos" and "ei_subcontratista" in scope.columns:
 
 as_of = _filtered_as_of(scope, cutoff)
 item_summary = _build_item_summary(as_of)
-executed_mask = as_of["ejecutado"].fillna(False).astype(bool) if "ejecutado" in as_of.columns else pd.Series(False, index=as_of.index)
-executed_count = int(executed_mask.sum())
-total_count = int(len(as_of))
-pct_count = executed_count / total_count * 100 if total_count else 0.0
-code_count = as_of["assembly_code"].nunique()
-st.markdown(
-    """
-    <style>
-    /* Reducir el tamaño del valor principal de la métrica */
-    div[data-testid="stMetricValue"] > div {
-        font-size: 1.3rem !important;
-    }
-    /* Reducir el tamaño de la etiqueta/título */
-    div[data-testid="stMetricLabel"] label {
-        font-size: 0.85rem !important;
-    }
-    /* Opcional: Tarjeta visual suave con menos relleno interno */
-    div[data-testid="stMetric"] {
-        background-color: #f8f9fa;
-        padding: 8px 12px;
-        border-radius: 8px;
-        border: 1px solid #e0e0e0;
-    }
-    </style>
-""",
-    unsafe_allow_html=True,
-)
-st.markdown('<div class="section-title">Indicadores de avance BIM</div>', unsafe_allow_html=True)
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Avance por elementos", f"{pct_count:.1f}%")
-k2.metric("Elementos ejecutados", f"{executed_count:,} / {total_count:,}")
-k3.metric("Códigos de montaje", f"{code_count:,}")
-updated = date.fromtimestamp(pyrevit_file.stat().st_mtime).strftime("%d-%m-%Y %H:%M") if pyrevit_file else "—"
-k4.metric("Última exportación", updated)
-
-unit_columns = [column for column in ("m2", "m3", "ml") if column in as_of.columns]
-if unit_columns:
-    unit_cols = st.columns(len(unit_columns))
-    for column, container in zip(unit_columns, unit_cols):
-        values = pd.to_numeric(as_of.loc[executed_mask, column], errors="coerce").fillna(0)
-        label = {"m2": "m² ejecutados", "m3": "m³ ejecutados", "ml": "ml ejecutados"}[column]
-        container.metric(label, f"{values.sum():,.2f}")
-
 st.markdown('<div class="section-title">Análisis ejecutivo</div>', unsafe_allow_html=True)
 tab_curve, tab_items = st.tabs(["Curva de avance", "Partidas / códigos"])
 
