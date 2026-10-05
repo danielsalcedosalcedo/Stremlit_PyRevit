@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import io
 import re
 import sys
 from datetime import date
@@ -35,6 +36,7 @@ from logic.processor import (  # noqa: E402
     calcular_curva_s_real_pyrevit,
     calcular_curva_s_semanal,
     extraer_unidad_y_cantidad_de_desc,
+    generar_reporte_diario_partidas,
 )
 
 st.set_page_config(
@@ -276,6 +278,38 @@ def _activity_choices(planned_data: dict, df_datos: pd.DataFrame | None) -> list
     return choices
 
 
+def _build_excel_export(reports: dict[str, pd.DataFrame]) -> bytes:
+    """Construye un libro Excel con una hoja por partida."""
+    output = io.BytesIO()
+    used_names: set[str] = set()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for activity, report in reports.items():
+            base_name = re.sub(r"[\[\]:*?/\\]", "_", activity).strip("' ") or "Partida"
+            sheet_name = base_name[:31]
+            suffix = 2
+            while sheet_name.casefold() in used_names:
+                suffix_text = f"_{suffix}"
+                sheet_name = f"{base_name[:31 - len(suffix_text)]}{suffix_text}"
+                suffix += 1
+            used_names.add(sheet_name.casefold())
+            report.to_excel(writer, sheet_name=sheet_name, index=False)
+            worksheet = writer.sheets[sheet_name]
+            worksheet.freeze_panes = "A2"
+            worksheet.auto_filter.ref = worksheet.dimensions
+            worksheet.column_dimensions["A"].width = 15
+            for column in ("B", "D"):
+                worksheet.column_dimensions[column].width = 22
+                for cell in worksheet[column][1:]:
+                    cell.number_format = '0.00"%"'
+            for column in ("C", "E"):
+                worksheet.column_dimensions[column].width = 28
+                for cell in worksheet[column][1:]:
+                    cell.number_format = "#,##0.000"
+            for cell in worksheet["A"][1:]:
+                cell.number_format = "DD-MM-YYYY"
+    return output.getvalue()
+
+
 excel_file = _first_existing(EXCEL_CANDIDATES)
 pyrevit_files = tuple(
     path for path in PYREVIT_CANDIDATES if path.is_file() and path.stat().st_size > 0
@@ -376,7 +410,7 @@ with tab_curve:
             for _, row in item_summary.iterrows()
         ]
     chosen_activity = st.selectbox(
-        "Partida · ITEM y nombre de tarea",
+        "Seleccione la partida a visualizar",
         options=[None] + activity_choices,
         format_func=lambda option: (
             "Global · Todas las partidas"
@@ -469,6 +503,71 @@ with tab_curve:
             ),
             use_container_width=True,
         )
+
+    st.markdown("#### Exportar evolución diaria de partidas")
+    if loaded["avance_diario"]:
+        export_choices = _activity_choices(
+            loaded["avance_diario"], loaded["df_datos"]
+        )
+        export_codes = {
+            choice["activity"]: choice["code"] for choice in export_choices
+        }
+        export_schedules = {
+            name: details.copy()
+            for name, details in loaded["avance_diario"]["actividades"].items()
+        }
+        for choice in export_choices:
+            code = choice["code"]
+            details = export_schedules.setdefault(
+                choice["activity"], {"item": code}
+            )
+            if not code or loaded["df_datos"] is None:
+                continue
+            schedule_row = loaded["df_datos"].loc[
+                loaded["df_datos"]["ITEM"].astype(str).str.strip() == code
+            ]
+            if schedule_row.empty:
+                continue
+            row = schedule_row.iloc[0]
+            if pd.isna(details.get("inicio")):
+                details["inicio"] = row.get("Comienzo")
+            if pd.isna(details.get("dias")):
+                details["dias"] = row.get("N° días hábiles (calc.)")
+
+        try:
+            daily_reports = generar_reporte_diario_partidas(
+                scope,
+                export_schedules,
+                export_codes,
+                pd.Timestamp("2026-08-24"),
+                pd.Timestamp(date.today()),
+            )
+            if daily_reports:
+                workbook = _build_excel_export(daily_reports)
+                st.download_button(
+                    "Descargar Excel con evolución diaria",
+                    data=workbook,
+                    file_name=(
+                        f"avance_diario_partidas_2026-08-24_al_"
+                        f"{date.today():%Y-%m-%d}.xlsx"
+                    ),
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    key="jefatura_download_daily_progress",
+                )
+                st.caption(
+                    f"El libro incluye {len(daily_reports)} partidas con cantidades BIM, "
+                    "desde el 24-08-2026 hasta hoy. Los porcentajes corresponden al "
+                    "avance diario respecto de la cantidad total de cada partida."
+                )
+            else:
+                st.info("No hay partidas con cantidad BIM y actividad programada para exportar.")
+        except Exception as exc:
+            st.error(f"No fue posible generar el Excel de avance diario: {exc}")
+    else:
+        st.info("La exportación requiere la hoja Avance Diario del Excel programado.")
 
 with tab_items:
     if item_summary.empty:
