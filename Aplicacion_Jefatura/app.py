@@ -246,12 +246,21 @@ def _activity_choices(planned_data: dict, df_datos: pd.DataFrame | None) -> list
     """Arma opciones de actividad mostrando ITEM y nombre de tarea."""
     activities = planned_data.get("actividades", {})
     rows = df_datos.to_dict("records") if df_datos is not None and not df_datos.empty else []
+    valid_items = {
+        str(row.get("ITEM", "")).strip()
+        for row in rows
+        if str(row.get("ITEM", "")).strip()
+    }
     choices = []
 
     for activity_name, details in activities.items():
         scheduled_item = str(details.get("item", "")).strip()
         match = next(
-            (row for row in rows if scheduled_item and str(row.get("ITEM", "")).strip() == scheduled_item),
+            (
+                row for row in rows
+                if scheduled_item
+                and str(row.get("ITEM", "")).strip() == scheduled_item
+            ),
             None,
         )
         if match is None:
@@ -263,7 +272,14 @@ def _activity_choices(planned_data: dict, df_datos: pd.DataFrame | None) -> list
             if len(matches) == 1:
                 match = matches[0]
 
-        item_value = match.get("ITEM", "") if match else scheduled_item
+        item_value = (
+            match.get("ITEM", "")
+            if match
+            else scheduled_item
+            if scheduled_item in valid_items
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", scheduled_item)
+            else ""
+        )
         item_code = "" if pd.isna(item_value) else str(item_value).strip()
         task_value = match.get("Nombre de tarea", "") if match else activity_name
         task_name = "" if pd.isna(task_value) else str(task_value).strip()
@@ -279,20 +295,32 @@ def _activity_choices(planned_data: dict, df_datos: pd.DataFrame | None) -> list
     return choices
 
 
-def _build_excel_export(reports: dict[str, pd.DataFrame]) -> bytes:
+def _build_excel_export(
+    reports: dict[str, pd.DataFrame],
+    codes_by_activity: dict[str, str] | None = None,
+) -> bytes:
     """Construye un libro Excel con una hoja por partida."""
     output = io.BytesIO()
     used_names: set[str] = set()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for code, report in reports.items():
+        for report_key, report in reports.items():
+            code = str(
+                report.attrs.get("codigo_partida")
+                or (codes_by_activity or {}).get(report_key)
+                or report_key
+            ).strip()
             sheet_name = re.sub(r"[\[\]:*?/\\]", "_", code).strip("' ")[:31]
             if not sheet_name:
-                raise ValueError(f"El código de partida {code!r} no es válido como hoja Excel.")
-            if sheet_name.casefold() in used_names:
-                raise ValueError(f"El código de partida {code!r} genera un nombre de hoja duplicado.")
+                sheet_name = "Partida"
+            base_name = sheet_name
+            suffix = 2
+            while sheet_name.casefold() in used_names:
+                suffix_text = f"_{suffix}"
+                sheet_name = f"{base_name[:31 - len(suffix_text)]}{suffix_text}"
+                suffix += 1
             used_names.add(sheet_name.casefold())
             worksheet = writer.book.create_sheet(sheet_name)
-            task_name = report.attrs.get("nombre_partida", "")
+            task_name = report.attrs.get("nombre_partida", report_key)
             worksheet.merge_cells("A1:E1")
             title = worksheet["A1"]
             title.value = f"{code} - {task_name}"
@@ -562,7 +590,7 @@ with tab_curve:
                 pd.Timestamp(date.today()),
             )
             if daily_reports:
-                workbook = _build_excel_export(daily_reports)
+                workbook = _build_excel_export(daily_reports, export_codes)
                 st.download_button(
                     "Descargar Excel con evolución diaria",
                     data=workbook,
