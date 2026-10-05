@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+from openpyxl.styles import Alignment, Font, PatternFill
 import streamlit as st
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -283,29 +284,47 @@ def _build_excel_export(reports: dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
     used_names: set[str] = set()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for activity, report in reports.items():
-            base_name = re.sub(r"[\[\]:*?/\\]", "_", activity).strip("' ") or "Partida"
-            sheet_name = base_name[:31]
-            suffix = 2
-            while sheet_name.casefold() in used_names:
-                suffix_text = f"_{suffix}"
-                sheet_name = f"{base_name[:31 - len(suffix_text)]}{suffix_text}"
-                suffix += 1
+        for code, report in reports.items():
+            sheet_name = re.sub(r"[\[\]:*?/\\]", "_", code).strip("' ")[:31]
+            if not sheet_name:
+                raise ValueError(f"El código de partida {code!r} no es válido como hoja Excel.")
+            if sheet_name.casefold() in used_names:
+                raise ValueError(f"El código de partida {code!r} genera un nombre de hoja duplicado.")
             used_names.add(sheet_name.casefold())
-            report.to_excel(writer, sheet_name=sheet_name, index=False)
+            worksheet = writer.book.create_sheet(sheet_name)
+            task_name = report.attrs.get("nombre_partida", "")
+            worksheet.merge_cells("A1:E1")
+            title = worksheet["A1"]
+            title.value = f"{code} - {task_name}"
+            title.font = Font(
+                name="Calibri", size=14, bold=True, color="FFFFFF"
+            )
+            title.fill = PatternFill(
+                fill_type="solid", fgColor="0A2A62"
+            )
+            title.alignment = Alignment(
+                horizontal="left", vertical="center"
+            )
+            worksheet.row_dimensions[1].height = 26
+            report.to_excel(
+                writer,
+                sheet_name=sheet_name,
+                index=False,
+                startrow=2,
+            )
             worksheet = writer.sheets[sheet_name]
-            worksheet.freeze_panes = "A2"
-            worksheet.auto_filter.ref = worksheet.dimensions
+            worksheet.freeze_panes = "A4"
+            worksheet.auto_filter.ref = f"A3:E{worksheet.max_row}"
             worksheet.column_dimensions["A"].width = 15
             for column in ("B", "D"):
                 worksheet.column_dimensions[column].width = 22
-                for cell in worksheet[column][1:]:
+                for cell in worksheet[column][3:]:
                     cell.number_format = '0.00"%"'
             for column in ("C", "E"):
                 worksheet.column_dimensions[column].width = 28
-                for cell in worksheet[column][1:]:
+                for cell in worksheet[column][3:]:
                     cell.number_format = "#,##0.000"
-            for cell in worksheet["A"][1:]:
+            for cell in worksheet["A"][3:]:
                 cell.number_format = "DD-MM-YYYY"
     return output.getvalue()
 
