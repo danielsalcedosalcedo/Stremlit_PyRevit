@@ -738,7 +738,16 @@ def grafico_comparativo_cantidades_plotly(
 ) -> go.Figure:
     """Compara cantidades programadas y ejecutadas en barras verticales."""
     fig = go.Figure()
-    if df_periodos is None or df_periodos.empty:
+    unit_columns = (
+        [
+            column.removeprefix("cantidad_programada_")
+            for column in df_periodos.columns
+            if column.startswith("cantidad_programada_")
+        ]
+        if df_periodos is not None
+        else []
+    )
+    if df_periodos is None or df_periodos.empty or not unit_columns:
         fig.add_annotation(
             text="Sin períodos de avance para comparar",
             xref="paper",
@@ -751,24 +760,34 @@ def grafico_comparativo_cantidades_plotly(
         _apply_plotly_layout(fig, titulo)
         return fig
 
-    fig.add_trace(
-        go.Bar(
-            x=df_periodos["periodo"],
-            y=df_periodos["cantidad_programada"],
-            name="Programado",
-            marker_color=C["programado"],
-            hovertemplate="%{x}<br>Programado: %{y:,.2f}<extra></extra>",
+    unit_labels = df_periodos.attrs.get("unidades", {})
+    for unit in unit_columns:
+        label = unit_labels.get(unit, unit)
+        fig.add_trace(
+            go.Bar(
+                x=df_periodos["periodo"],
+                y=df_periodos[f"cantidad_programada_{unit}"],
+                name=f"Programado · {label}",
+                marker_color=C["programado"],
+                hovertemplate=(
+                    f"%{{x}}<br>Programado ({label}): %{{y:,.2f}}"
+                    "<extra></extra>"
+                ),
+            )
         )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=df_periodos["periodo"],
-            y=df_periodos["cantidad_real"],
-            name="Real",
-            marker_color=C["real"],
-            hovertemplate="%{x}<br>Real: %{y:,.2f}<extra></extra>",
+        fig.add_trace(
+            go.Bar(
+                x=df_periodos["periodo"],
+                y=df_periodos[f"cantidad_real_{unit}"],
+                name=f"Real · {label}",
+                marker_color=C["real"],
+                marker_pattern_shape="/",
+                hovertemplate=(
+                    f"%{{x}}<br>Real ({label}): %{{y:,.2f}}"
+                    "<extra></extra>"
+                ),
+            )
         )
-    )
 
     _apply_plotly_layout(fig, titulo)
     fig.update_layout(

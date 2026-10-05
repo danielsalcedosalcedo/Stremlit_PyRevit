@@ -342,7 +342,8 @@ def calcular_comparativo_cantidades_periodo(
         workdays = pd.bdate_range(start=start.normalize(), periods=duration)
         scheduled_days_by_code.setdefault(code, []).extend(workdays.tolist())
 
-    planned_by_date: dict[pd.Timestamp, float] = {}
+    planned_by_date: dict[pd.Timestamp, dict[str, float]] = {}
+    real_by_date: dict[pd.Timestamp, dict[str, float]] = {}
     if "assembly_code" in df_pyrevit.columns:
         assembly_codes = df_pyrevit["assembly_code"].astype(str).str.strip()
         for code, workdays in scheduled_days_by_code.items():
@@ -350,23 +351,60 @@ def calcular_comparativo_cantidades_periodo(
             if matching_elements.empty or not workdays:
                 continue
 
-            quantity_per_day = calcular_cantidad_referencia_pyrevit(matching_elements) / len(workdays)
+            quantity_column = _detectar_columna_cantidad(matching_elements)
+            if quantity_column is None:
+                continue
+            quantity_unit = {
+                "m2": "m2",
+                "m3": "m3",
+                "ml": "ml",
+                "cantidad_total": "unidades",
+            }[quantity_column]
+            quantity_total = float(
+                pd.to_numeric(matching_elements[quantity_column], errors="coerce")
+                .fillna(0)
+                .sum()
+            )
+            quantity_per_day = quantity_total / len(workdays)
             for workday in workdays:
                 day = pd.Timestamp(workday).normalize()
-                planned_by_date[day] = planned_by_date.get(day, 0.0) + quantity_per_day
+                day_values = planned_by_date.setdefault(day, {})
+                day_values[quantity_unit] = (
+                    day_values.get(quantity_unit, 0.0) + quantity_per_day
+                )
+
+            real_item = calcular_curva_s_real_pyrevit(
+                matching_elements,
+                frecuencia="D",
+                fecha_corte=fecha_corte,
+            )
+            for _, row in real_item.iterrows():
+                day = pd.to_datetime(row["fecha"], errors="coerce")
+                if pd.isna(day):
+                    continue
+                day = day.normalize()
+                day_values = real_by_date.setdefault(day, {})
+                day_values[quantity_unit] = day_values.get(quantity_unit, 0.0) + float(
+                    row["cantidad_ejecutada_periodo"]
+                )
+
+    unit_labels = {
+        "m2": "m²",
+        "m3": "m³",
+        "ml": "ml",
+        "unidades": "unidades",
+    }
 
     if frecuencia == "D":
-        periods = pd.to_datetime(planned_curve["fecha"], errors="coerce").dt.normalize()
-        period_labels = periods.dt.strftime("%d-%m-%Y")
-        planned_amounts = [planned_by_date.get(period, 0.0) for period in periods]
-        actual_by_date = {}
-        if not real_curve.empty:
-            actual_dates = pd.to_datetime(real_curve["fecha"], errors="coerce").dt.normalize()
-            actual_values = pd.to_numeric(
-                real_curve["cantidad_ejecutada_periodo"], errors="coerce"
-            ).fillna(0)
-            actual_by_date = dict(zip(actual_dates, actual_values))
-        actual = [actual_by_date.get(period, 0.0) for period in periods]
+        planned_dates = pd.to_datetime(planned_curve["fecha"], errors="coerce").dropna()
+        all_dates = [planned_dates.min().normalize(), planned_dates.max().normalize()]
+        all_dates.extend(real_by_date)
+        period_start = min(all_dates)
+        period_end = max(all_dates)
+        periods = pd.date_range(period_start, period_end, freq="D")
+        period_labels = periods.strftime("%d-%m-%Y")
+        period_planned = [planned_by_date.get(period, {}) for period in periods]
+        period_actual = [real_by_date.get(period, {}) for period in periods]
     else:
         months = {
             "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
@@ -403,34 +441,85 @@ def calcular_comparativo_cantidades_periodo(
                 pd.Timestamp(end_year, end_month_num, int(end_day)),
             ))
 
-        planned_amounts = [0.0] * len(bounds)
-        for day, quantity in planned_by_date.items():
-            for index, (start, end) in enumerate(bounds):
-                if start is not None and start <= day <= end:
-                    planned_amounts[index] += quantity
-                    break
+        schedule_labels = (
+            planned_curve["semana_label"].astype(str).tolist()
+            if "semana_label" in planned_curve.columns
+            else []
+        )
+        labels_by_start = {
+            start.normalize(): schedule_labels[index]
+            for index, (start, _) in enumerate(bounds)
+            if start is not None and index < len(schedule_labels)
+        }
+        actual_by_start: dict[pd.Timestamp, dict[str, float]] = {}
+        for actual_date, quantities in real_by_date.items():
+            week_start = (
+                actual_date - pd.Timedelta(days=actual_date.weekday())
+            ).normalize()
+            week_values = actual_by_start.setdefault(week_start, {})
+            for unit, amount in quantities.items():
+                week_values[unit] = week_values.get(unit, 0.0) + amount
 
-        actual_by_period = [0.0] * len(bounds)
-        if not real_curve.empty:
-            actual_dates = pd.to_datetime(real_curve["fecha"], errors="coerce").dt.normalize()
-            actual_values = pd.to_numeric(
-                real_curve["cantidad_ejecutada_periodo"], errors="coerce"
-            ).fillna(0)
-            for actual_date, amount in zip(actual_dates, actual_values):
-                if pd.isna(actual_date):
-                    continue
-                for index, (start, end) in enumerate(bounds):
-                    if start is not None and start <= actual_date <= end:
-                        actual_by_period[index] += float(amount)
-                        break
-        actual = actual_by_period
-        period_labels = planned_curve["semana_label"].astype(str)
+        scheduled_starts = list(labels_by_start)
+        actual_starts = list(actual_by_start)
+        planned_starts = [
+            (day - pd.Timedelta(days=day.weekday())).normalize()
+            for day in planned_by_date
+        ]
+        all_starts = scheduled_starts + actual_starts + planned_starts
+        if not all_starts:
+            return pd.DataFrame(columns=[
+                "periodo", "cantidad_programada", "cantidad_real"
+            ])
 
-    return pd.DataFrame({
-        "periodo": period_labels,
-        "cantidad_programada": pd.Series(planned_amounts).round(2),
-        "cantidad_real": actual,
+        first_week = min(all_starts)
+        last_week = max(all_starts)
+        week_starts = pd.date_range(first_week, last_week, freq="7D")
+        first_scheduled_week = min(scheduled_starts) if scheduled_starts else None
+        first_label_match = (
+            re.search(r"(\d+)$", labels_by_start[first_scheduled_week])
+            if first_scheduled_week is not None
+            else None
+        )
+        first_week_number = int(first_label_match.group(1)) if first_label_match else None
+
+        period_labels = []
+        period_planned = []
+        period_actual = []
+        for week_start in week_starts:
+            period_end = week_start + pd.Timedelta(days=6)
+            label = labels_by_start.get(week_start)
+            if label is None and first_scheduled_week is not None and first_week_number is not None:
+                offset = (week_start - first_scheduled_week).days // 7
+                label = f"S{first_week_number + offset:02d}"
+            if label is None:
+                label = f"{week_start:%d-%b} al {period_end:%d-%b}"
+            period_labels.append(label)
+            week_planned: dict[str, float] = {}
+            for day, quantities in planned_by_date.items():
+                if week_start <= day <= period_end:
+                    for unit, quantity in quantities.items():
+                        week_planned[unit] = week_planned.get(unit, 0.0) + quantity
+            period_planned.append(week_planned)
+            period_actual.append(actual_by_start.get(week_start, {}))
+
+    units = sorted({
+        unit
+        for values in [*period_planned, *period_actual]
+        for unit in values
     })
+    result = pd.DataFrame({"periodo": period_labels})
+    for unit in units:
+        result[f"cantidad_programada_{unit}"] = [
+            quantities.get(unit, 0.0) for quantities in period_planned
+        ]
+        result[f"cantidad_real_{unit}"] = [
+            quantities.get(unit, 0.0) for quantities in period_actual
+        ]
+    result.attrs["unidades"] = {
+        unit: unit_labels[unit] for unit in units
+    }
+    return result
 
 
 def calcular_curva_s_real_pyrevit(df_pyrevit: pd.DataFrame,
