@@ -30,7 +30,6 @@ from logic.loader import (  # noqa: E402
     load_pyrevit_json,
 )
 from logic.processor import (  # noqa: E402
-    calcular_cantidad_referencia_pyrevit,
     calcular_comparativo_cantidades_periodo,
     calcular_curva_s_diaria,
     calcular_curva_s_real_pyrevit,
@@ -420,12 +419,38 @@ with tab_curve:
             )
         st.plotly_chart(chart, use_container_width=True)
         st.caption("La curva programada se obtiene del Excel fijo del proyecto; la real, de la exportación PyRevit.")
+        scheduled_activities = {}
+        if loaded["avance_diario"]:
+            scheduled_activities = {
+                name: details.copy()
+                for name, details in loaded["avance_diario"]["actividades"].items()
+            }
+        activity_codes = {}
+        for choice in activity_choices:
+            name = choice["activity"]
+            code = choice["code"]
+            activity_codes[name] = code
+            details = scheduled_activities.setdefault(name, {"item": code})
+            if code and loaded["df_datos"] is not None and not loaded["df_datos"].empty:
+                schedule_row = loaded["df_datos"].loc[
+                    loaded["df_datos"]["ITEM"].astype(str).str.strip() == code
+                ]
+                if not schedule_row.empty:
+                    row = schedule_row.iloc[0]
+                    if pd.isna(details.get("inicio")):
+                        details["inicio"] = row.get("Comienzo")
+                    if pd.isna(details.get("dias")):
+                        details["dias"] = row.get("N° días hábiles (calc.)")
+
         quantity_comparison = calcular_comparativo_cantidades_periodo(
             planned_curve,
             real_curve,
-            calcular_cantidad_referencia_pyrevit(curve_scope),
+            curve_scope,
+            scheduled_activities,
+            activity_codes,
             frequency,
             pd.Timestamp(cutoff),
+            actividad=chosen_activity["activity"] if chosen_activity else None,
         )
         st.markdown("#### Avance por período · Cantidad programada vs. real")
         st.plotly_chart(
