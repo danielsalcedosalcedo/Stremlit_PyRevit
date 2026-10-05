@@ -323,6 +323,7 @@ def calcular_comparativo_cantidades_periodo(
         return pd.DataFrame()
 
     scheduled_days_by_code: dict[str, list[pd.Timestamp]] = {}
+    chart_start = pd.Timestamp("2026-08-24")
     for name, details in actividades_programadas.items():
         if actividad and name != actividad:
             continue
@@ -368,6 +369,8 @@ def calcular_comparativo_cantidades_periodo(
             quantity_per_day = quantity_total / len(workdays)
             for workday in workdays:
                 day = pd.Timestamp(workday).normalize()
+                if day < chart_start:
+                    continue
                 day_values = planned_by_date.setdefault(day, {})
                 day_values[quantity_unit] = (
                     day_values.get(quantity_unit, 0.0) + quantity_per_day
@@ -383,6 +386,8 @@ def calcular_comparativo_cantidades_periodo(
                 if pd.isna(day):
                     continue
                 day = day.normalize()
+                if day < chart_start:
+                    continue
                 day_values = real_by_date.setdefault(day, {})
                 day_values[quantity_unit] = day_values.get(quantity_unit, 0.0) + float(
                     row["cantidad_ejecutada_periodo"]
@@ -397,9 +402,9 @@ def calcular_comparativo_cantidades_periodo(
 
     if frecuencia == "D":
         planned_dates = pd.to_datetime(planned_curve["fecha"], errors="coerce").dropna()
-        all_dates = [planned_dates.min().normalize(), planned_dates.max().normalize()]
+        period_start = pd.Timestamp("2026-08-24")
+        all_dates = [period_start, planned_dates.max().normalize()]
         all_dates.extend(real_by_date)
-        period_start = min(all_dates)
         period_end = max(all_dates)
         periods = pd.date_range(period_start, period_end, freq="D")
         period_labels = periods.strftime("%d-%m-%Y")
@@ -466,7 +471,11 @@ def calcular_comparativo_cantidades_periodo(
             (day - pd.Timedelta(days=day.weekday())).normalize()
             for day in planned_by_date
         ]
-        all_starts = scheduled_starts + actual_starts + planned_starts
+        fixed_start = pd.Timestamp("2026-08-24")
+        fixed_week_start = (
+            fixed_start - pd.Timedelta(days=fixed_start.weekday())
+        ).normalize()
+        all_starts = [fixed_week_start] + scheduled_starts + actual_starts + planned_starts
         if not all_starts:
             return pd.DataFrame(columns=[
                 "periodo", "cantidad_programada", "cantidad_real"
@@ -520,6 +529,99 @@ def calcular_comparativo_cantidades_periodo(
         unit: unit_labels[unit] for unit in units
     }
     return result
+
+
+def generar_reporte_diario_partidas(
+    df_pyrevit: pd.DataFrame,
+    actividades_programadas: dict[str, dict],
+    codigos_actividad: dict[str, str],
+    fecha_inicio: pd.Timestamp,
+    fecha_fin: pd.Timestamp,
+) -> dict[str, pd.DataFrame]:
+    """Genera una hoja diaria por partida con cantidad BIM y distribución Gantt."""
+    start_date = pd.Timestamp(fecha_inicio).normalize()
+    end_date = pd.Timestamp(fecha_fin).normalize()
+    if start_date > end_date:
+        raise ValueError("La fecha inicial del reporte no puede ser posterior a la fecha final.")
+
+    dates = pd.date_range(start_date, end_date, freq="D")
+    if "assembly_code" not in df_pyrevit.columns:
+        return {}
+
+    normalized_codes = df_pyrevit["assembly_code"].astype(str).str.strip()
+    reports = {}
+    exported_codes = set()
+    for name, details in actividades_programadas.items():
+        code = str(codigos_actividad.get(name) or details.get("item") or "").strip()
+        if not code or code in exported_codes:
+            continue
+
+        item = df_pyrevit.loc[normalized_codes == code]
+        if item.empty:
+            continue
+        quantity_column = _detectar_columna_cantidad(item)
+        if quantity_column is None:
+            continue
+        total_quantity = float(
+            pd.to_numeric(item[quantity_column], errors="coerce").fillna(0).sum()
+        )
+        if total_quantity <= 0:
+            continue
+
+        scheduled_quantity_by_date: dict[pd.Timestamp, float] = {}
+        activity_start = pd.to_datetime(details.get("inicio"), errors="coerce")
+        duration_value = pd.to_numeric(details.get("dias"), errors="coerce")
+        if (
+            pd.notna(activity_start)
+            and pd.notna(duration_value)
+            and duration_value > 0
+        ):
+            duration = int(round(float(duration_value)))
+            workdays = pd.bdate_range(
+                start=activity_start.normalize(),
+                periods=duration,
+            )
+            if duration:
+                daily_quantity = total_quantity / duration
+                for workday in workdays:
+                    day = pd.Timestamp(workday).normalize()
+                    if start_date <= day <= end_date:
+                        scheduled_quantity_by_date[day] = daily_quantity
+
+        actual_quantity_by_date: dict[pd.Timestamp, float] = {}
+        actual_curve = calcular_curva_s_real_pyrevit(
+            item,
+            frecuencia="D",
+            fecha_corte=end_date,
+        )
+        if not actual_curve.empty:
+            for _, row in actual_curve.iterrows():
+                day = pd.to_datetime(row["fecha"], errors="coerce")
+                if pd.isna(day):
+                    continue
+                day = day.normalize()
+                if start_date <= day <= end_date:
+                    actual_quantity_by_date[day] = float(
+                        row["cantidad_ejecutada_periodo"]
+                    )
+
+        scheduled = [scheduled_quantity_by_date.get(day, 0.0) for day in dates]
+        actual = [actual_quantity_by_date.get(day, 0.0) for day in dates]
+        report = pd.DataFrame({
+            "Fecha": dates,
+            "Avance programado (%)": [
+                quantity / total_quantity * 100 for quantity in scheduled
+            ],
+            "Avance programado (cantidad)": scheduled,
+            "Avance real (%)": [
+                quantity / total_quantity * 100 for quantity in actual
+            ],
+            "Avance real (cantidad)": actual,
+        })
+        reports[name or code] = report
+        exported_codes.add(code)
+
+    return reports
 
 
 def calcular_curva_s_real_pyrevit(df_pyrevit: pd.DataFrame,

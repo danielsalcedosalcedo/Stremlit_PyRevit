@@ -30,6 +30,10 @@ C = {
     "subtext":    "#6B7280",
     "border":     "#C5CDD6",
 }
+_SPANISH_MONTHS = [
+    "ene", "feb", "mar", "abr", "may", "jun",
+    "jul", "ago", "sep", "oct", "nov", "dic",
+]
 
 
 def _apply_style(fig, *axes):
@@ -599,6 +603,48 @@ def _current_week_label(df_prog: pd.DataFrame, today: date) -> str | None:
 def grafico_curva_s_semanal_plotly(df_prog: pd.DataFrame,
                                     titulo: str = "Curva S – Avance Semanal Programado vs Real",
                                     df_real_pyrevit: pd.DataFrame = None) -> go.Figure:
+    df_prog = df_prog.copy()
+    anchor = pd.Timestamp("2026-08-24")
+    if not df_prog.empty and "semana_rango" in df_prog.columns:
+        first_range = str(df_prog.iloc[0]["semana_rango"]).lower()
+        match = re.search(r"(\d{1,2})-([a-zñ]{3})", first_range)
+        label_match = re.search(r"(\d+)$", str(df_prog.iloc[0]["semana_label"]))
+        if match and label_match:
+            months = {
+                "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+                "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12,
+            }
+            first_month = months.get(match.group(2))
+            if first_month:
+                first_start = pd.Timestamp(
+                    anchor.year, first_month, int(match.group(1))
+                )
+                if first_start < anchor - pd.Timedelta(days=180):
+                    first_start += pd.DateOffset(years=1)
+                elif first_start > anchor + pd.Timedelta(days=180):
+                    first_start -= pd.DateOffset(years=1)
+                missing_weeks = max(0, (first_start - anchor).days // 7)
+                first_number = int(label_match.group(1)) - missing_weeks
+                prefix_rows = []
+                for index in range(missing_weeks):
+                    week_start = anchor + pd.Timedelta(weeks=index)
+                    week_end = week_start + pd.Timedelta(days=6)
+                    prefix_rows.append({
+                        "semana": f"S{first_number + index:02d}\n",
+                        "semana_label": f"S{first_number + index:02d}",
+                        "semana_rango": (
+                            f"{week_start.day:02d}-{_SPANISH_MONTHS[week_start.month - 1]} "
+                            f"al {week_end.day:02d}-{_SPANISH_MONTHS[week_end.month - 1]}"
+                        ),
+                        "parcial": 0.0,
+                        "acumulado": 0.0,
+                    })
+                if prefix_rows:
+                    df_prog = pd.concat(
+                        [pd.DataFrame(prefix_rows), df_prog],
+                        ignore_index=True,
+                    )
+
     fig = go.Figure()
     x_labels = df_prog["semana_label"].tolist() if "semana_label" in df_prog.columns else list(range(len(df_prog)))
     y_prog   = df_prog["acumulado"].tolist()
@@ -639,6 +685,7 @@ def grafico_curva_s_semanal_plotly(df_prog: pd.DataFrame,
         )
 
     _apply_plotly_layout(fig, titulo)
+    fig.update_xaxes(tickfont=dict(size=8))
     fig.update_yaxes(title_text="Avance Acumulado %", range=[-5, 115], tickformat=".1f")
     current_week = _current_week_label(df_prog, date.today())
     if current_week is not None:
@@ -702,9 +749,10 @@ def grafico_curva_s_diaria_plotly(df_prog: pd.DataFrame,
         )
 
     _apply_plotly_layout(fig, titulo)
-    fig.update_xaxes(tickformat="%d-%m-%Y")
+    fig.update_xaxes(tickformat="%d-%m-%Y", tickfont=dict(size=8))
     fig.update_yaxes(title_text="Avance Acumulado %", range=[-5, 115], tickformat=".1f")
     today = pd.Timestamp(date.today())
+    chart_start = pd.Timestamp("2026-08-24")
     all_dates = pd.concat([fechas, fechas_r], ignore_index=True) if (
         df_real_pyrevit is not None
         and not df_real_pyrevit.empty
@@ -714,10 +762,12 @@ def grafico_curva_s_diaria_plotly(df_prog: pd.DataFrame,
     if not all_dates.empty:
         fig.update_xaxes(
             range=[
-                min(all_dates.min(), today),
+                chart_start,
                 max(all_dates.max(), today),
             ]
         )
+    else:
+        fig.update_xaxes(range=[chart_start, today])
     fig.add_trace(
         go.Scatter(
             x=[today, today],
@@ -796,6 +846,7 @@ def grafico_comparativo_cantidades_plotly(
         yaxis_title="Cantidad por período",
         xaxis_tickangle=-35,
     )
+    fig.update_xaxes(tickfont=dict(size=8))
     return fig
 
 
@@ -910,7 +961,11 @@ def grafico_curva_real_pyrevit_plotly(df_curva_real: pd.DataFrame,
     )
 
     _apply_plotly_layout(fig, titulo)
-    fig.update_xaxes(tickformat="%d-%m-%Y")
+    fig.update_xaxes(
+        tickformat="%d-%m-%Y",
+        tickfont=dict(size=8),
+        range=[pd.Timestamp("2026-08-24"), max(fechas.max(), pd.Timestamp(date.today()))],
+    )
     fig.update_yaxes(title_text="% Acumulado", range=[-5, 115], row=1, col=1)
     fig.update_yaxes(title_text="Cantidad", row=2, col=1)
     return fig
