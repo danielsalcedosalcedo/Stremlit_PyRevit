@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT_DIR))
 
 from logic.charts import (  # noqa: E402
     grafico_avance_por_item_plotly,
+    grafico_comparativo_cantidades_plotly,
     grafico_curva_real_pyrevit_plotly,
     grafico_curva_s_diaria_plotly,
     grafico_curva_s_semanal_plotly,
@@ -29,6 +30,8 @@ from logic.loader import (  # noqa: E402
     load_pyrevit_json,
 )
 from logic.processor import (  # noqa: E402
+    calcular_cantidad_referencia_pyrevit,
+    calcular_comparativo_cantidades_periodo,
     calcular_curva_s_diaria,
     calcular_curva_s_real_pyrevit,
     calcular_curva_s_semanal,
@@ -417,6 +420,18 @@ with tab_curve:
             )
         st.plotly_chart(chart, use_container_width=True)
         st.caption("La curva programada se obtiene del Excel fijo del proyecto; la real, de la exportación PyRevit.")
+        quantity_comparison = calcular_comparativo_cantidades_periodo(
+            planned_curve,
+            real_curve,
+            calcular_cantidad_referencia_pyrevit(curve_scope),
+            frequency,
+            pd.Timestamp(cutoff),
+        )
+        st.markdown("#### Avance por período · Cantidad programada vs. real")
+        st.plotly_chart(
+            grafico_comparativo_cantidades_plotly(quantity_comparison),
+            use_container_width=True,
+        )
     else:
         if not excel_file:
             st.info("La curva programada aparecerá cuando exista el Excel en data/programado/Demoliciones_Avance.xlsx. La curva real BIM está disponible a continuación.")
