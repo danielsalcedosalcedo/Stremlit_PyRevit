@@ -732,6 +732,54 @@ def grafico_curva_s_diaria_plotly(df_prog: pd.DataFrame,
     return fig
 
 
+def grafico_comparativo_cantidades_plotly(
+    df_periodos: pd.DataFrame,
+    titulo: str = "Avance en cantidad · Programado vs. real",
+) -> go.Figure:
+    """Compara cantidades programadas y ejecutadas en barras verticales."""
+    fig = go.Figure()
+    if df_periodos is None or df_periodos.empty:
+        fig.add_annotation(
+            text="Sin períodos de avance para comparar",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(size=14, color=C["subtext"]),
+        )
+        _apply_plotly_layout(fig, titulo)
+        return fig
+
+    fig.add_trace(
+        go.Bar(
+            x=df_periodos["periodo"],
+            y=df_periodos["cantidad_programada"],
+            name="Programado",
+            marker_color=C["programado"],
+            hovertemplate="%{x}<br>Programado: %{y:,.2f}<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=df_periodos["periodo"],
+            y=df_periodos["cantidad_real"],
+            name="Real",
+            marker_color=C["real"],
+            hovertemplate="%{x}<br>Real: %{y:,.2f}<extra></extra>",
+        )
+    )
+
+    _apply_plotly_layout(fig, titulo)
+    fig.update_layout(
+        barmode="group",
+        xaxis_title="Período",
+        yaxis_title="Cantidad por período",
+        xaxis_tickangle=-35,
+    )
+    return fig
+
+
 def grafico_avance_por_item_plotly(df_vinculado: pd.DataFrame,
                                     titulo: str = "Avance Ejecutado por ITEM (Assembly Code)") -> go.Figure:
     if df_vinculado is None or df_vinculado.empty or "pct_ejecutado" not in df_vinculado.columns:

@@ -2,6 +2,8 @@
 # Procesamiento de datos y Curvas S – con vinculación ITEM ↔ Assembly Code
 # Desarrollado por Daniel Salcedo - Coordinador BIM
 
+import re
+
 import pandas as pd
 import numpy as np
 
@@ -292,6 +294,103 @@ def _detectar_columna_cantidad(df: pd.DataFrame) -> str:
     if tiene_ml:  return "ml"
     if tiene_qty: return "cantidad_total"
     return None
+
+
+def calcular_cantidad_referencia_pyrevit(df_pyrevit: pd.DataFrame) -> float:
+    """Retorna la cantidad BIM total usando la misma unidad de la curva real."""
+    if df_pyrevit is None or df_pyrevit.empty:
+        return 0.0
+
+    col_qty = _detectar_columna_cantidad(df_pyrevit)
+    if col_qty is None:
+        return 0.0
+
+    return float(pd.to_numeric(df_pyrevit[col_qty], errors="coerce").fillna(0).sum())
+
+
+def calcular_comparativo_cantidades_periodo(
+    planned_curve: pd.DataFrame,
+    real_curve: pd.DataFrame,
+    total_quantity: float,
+    frecuencia: str,
+    fecha_corte: pd.Timestamp,
+) -> pd.DataFrame:
+    """Alinea cantidades planificadas y reales en los períodos de la curva."""
+    if planned_curve.empty:
+        return pd.DataFrame()
+
+    planned = planned_curve.copy()
+    progress = pd.to_numeric(planned["acumulado"], errors="coerce").fillna(0)
+    planned["cantidad_programada"] = (
+        progress.diff().fillna(progress).clip(lower=0) * total_quantity / 100
+    )
+
+    if frecuencia == "D":
+        periods = pd.to_datetime(planned["fecha"], errors="coerce").dt.normalize()
+        period_labels = periods.dt.strftime("%d-%m-%Y")
+        actual_by_date = {}
+        if not real_curve.empty:
+            actual_dates = pd.to_datetime(real_curve["fecha"], errors="coerce").dt.normalize()
+            actual_values = pd.to_numeric(
+                real_curve["cantidad_ejecutada_periodo"], errors="coerce"
+            ).fillna(0)
+            actual_by_date = dict(zip(actual_dates, actual_values))
+        actual = [actual_by_date.get(period, 0.0) for period in periods]
+    else:
+        months = {
+            "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+            "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12,
+        }
+        bounds = []
+        for week_range in planned.get("semana_rango", pd.Series("", index=planned.index)):
+            match = re.search(
+                r"(\d{1,2})-([a-zñ]{3})\s+al\s+(\d{1,2})-([a-zñ]{3})",
+                str(week_range).lower(),
+            )
+            if not match:
+                bounds.append((None, None))
+                continue
+
+            start_day, start_month, end_day, end_month = match.groups()
+            start_month_num = months.get(start_month)
+            end_month_num = months.get(end_month)
+            if start_month_num is None or end_month_num is None:
+                bounds.append((None, None))
+                continue
+
+            start_year = fecha_corte.year
+            start_date = pd.Timestamp(start_year, start_month_num, int(start_day))
+            if start_date.date() > fecha_corte.date() + pd.Timedelta(days=180):
+                start_year -= 1
+            elif start_date.date() < fecha_corte.date() - pd.Timedelta(days=180):
+                start_year += 1
+            end_year = start_year + int(end_month_num < start_month_num)
+            bounds.append((
+                pd.Timestamp(start_year, start_month_num, int(start_day)),
+                pd.Timestamp(end_year, end_month_num, int(end_day)),
+            ))
+
+        actual_by_period = [0.0] * len(bounds)
+        if not real_curve.empty:
+            actual_dates = pd.to_datetime(real_curve["fecha"], errors="coerce").dt.normalize()
+            actual_values = pd.to_numeric(
+                real_curve["cantidad_ejecutada_periodo"], errors="coerce"
+            ).fillna(0)
+            for actual_date, amount in zip(actual_dates, actual_values):
+                if pd.isna(actual_date):
+                    continue
+                for index, (start, end) in enumerate(bounds):
+                    if start is not None and start <= actual_date <= end:
+                        actual_by_period[index] += float(amount)
+                        break
+        actual = actual_by_period
+        period_labels = planned["semana_label"].astype(str)
+
+    return pd.DataFrame({
+        "periodo": period_labels,
+        "cantidad_programada": planned["cantidad_programada"].round(2),
+        "cantidad_real": actual,
+    })
 
 
 def calcular_curva_s_real_pyrevit(df_pyrevit: pd.DataFrame,
