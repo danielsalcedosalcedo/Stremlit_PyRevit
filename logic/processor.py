@@ -618,7 +618,9 @@ def generar_reporte_diario_partidas(
             ],
             "Avance real (cantidad)": actual,
         })
-        reports[name or code] = report
+        report.attrs["codigo_partida"] = code
+        report.attrs["nombre_partida"] = name
+        reports[code] = report
         exported_codes.add(code)
 
     return reports
