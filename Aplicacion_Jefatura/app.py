@@ -397,6 +397,143 @@ def _build_excel_export(
     return output.getvalue()
 
 
+def _build_global_daily_reports(
+    df_pyrevit: pd.DataFrame,
+    item_summary: pd.DataFrame,
+    activities: dict[str, dict],
+    codes_by_activity: dict[str, str],
+    fecha_inicio: pd.Timestamp,
+    fecha_fin: pd.Timestamp,
+) -> dict[str, pd.DataFrame]:
+    """Genera avances diarios globales separados por unidad BIM."""
+    start_date = pd.Timestamp(fecha_inicio).normalize()
+    end_date = pd.Timestamp(fecha_fin).normalize()
+    if start_date > end_date:
+        raise ValueError("La fecha inicial del reporte no puede ser posterior a la fecha final.")
+
+    dates = pd.date_range(start_date, end_date, freq="D")
+    unit_labels = {"m2": "m²", "m3": "m³", "ml": "ml", "unid": "unitario"}
+    if item_summary.empty:
+        return {}
+
+    totals_by_code = dict(zip(
+        item_summary["assembly_code"].astype(str).str.strip(),
+        item_summary["Cantidad total"],
+    ))
+    units_by_code = dict(zip(
+        item_summary["assembly_code"].astype(str).str.strip(),
+        item_summary["Unidad"],
+    ))
+    planned_by_unit = {
+        unit: pd.Series(0.0, index=dates) for unit in unit_labels
+    }
+    scheduled_codes: set[str] = set()
+    for activity, details in activities.items():
+        code = str(codes_by_activity.get(activity) or details.get("item") or "").strip()
+        if (
+            not code
+            or code in scheduled_codes
+            or code not in totals_by_code
+            or units_by_code[code] not in unit_labels
+        ):
+            continue
+        scheduled_codes.add(code)
+
+        activity_start = pd.to_datetime(details.get("inicio"), errors="coerce")
+        duration_value = pd.to_numeric(details.get("dias"), errors="coerce")
+        if pd.isna(activity_start) or pd.isna(duration_value) or duration_value <= 0:
+            continue
+
+        duration = int(round(float(duration_value)))
+        if duration <= 0:
+            continue
+        workdays = pd.bdate_range(start=activity_start.normalize(), periods=duration)
+        quantity_per_day = float(totals_by_code[code]) / duration
+        unit = units_by_code[code]
+        for workday in workdays:
+            day = pd.Timestamp(workday).normalize()
+            if start_date <= day <= end_date:
+                planned_by_unit[unit].loc[day] += quantity_per_day
+
+    actual_by_unit = {}
+    for unit in unit_labels:
+        actual_curve = calcular_curva_s_real_pyrevit(
+            df_pyrevit,
+            frecuencia="D",
+            fecha_corte=end_date,
+            unidad=unit,
+        )
+        actual_by_date = pd.Series(0.0, index=dates)
+        for _, row in actual_curve.iterrows():
+            day = pd.to_datetime(row["fecha"], errors="coerce")
+            if pd.notna(day):
+                day = day.normalize()
+                if day in actual_by_date.index:
+                    actual_by_date.loc[day] += float(
+                        row["cantidad_ejecutada_periodo"]
+                    )
+        actual_by_unit[unit] = actual_by_date
+
+    reports = {}
+    for unit, unit_label in unit_labels.items():
+        total_quantity = float(
+            item_summary.loc[item_summary["Unidad"] == unit, "Cantidad total"].sum()
+        )
+        scheduled = planned_by_unit[unit]
+        actual = actual_by_unit[unit]
+        reports[unit] = pd.DataFrame({
+            "Fecha": dates,
+            "Avance programado (%)": (
+                scheduled / total_quantity * 100 if total_quantity > 0 else 0.0
+            ),
+            "Avance programado (cantidad)": scheduled.to_numpy(),
+            "Avance real (%)": (
+                actual / total_quantity * 100 if total_quantity > 0 else 0.0
+            ),
+            "Avance real (cantidad)": actual.to_numpy(),
+        })
+        reports[unit].attrs["titulo"] = f"Global · Todas las partidas · {unit_label}"
+    return reports
+
+
+def _build_global_excel_export(reports: dict[str, pd.DataFrame]) -> bytes:
+    """Construye un libro Excel global con una hoja por unidad."""
+    output = io.BytesIO()
+    unit_sheets = {"m2": "m2", "m3": "m3", "ml": "ml", "unid": "unitario"}
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for unit, report in reports.items():
+            sheet_name = unit_sheets[unit]
+            worksheet = writer.book.create_sheet(sheet_name)
+            worksheet.merge_cells("A1:E1")
+            title = worksheet["A1"]
+            title.value = report.attrs["titulo"]
+            title.font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
+            title.fill = PatternFill(fill_type="solid", fgColor="0A2A62")
+            title.alignment = Alignment(horizontal="left", vertical="center")
+            worksheet.row_dimensions[1].height = 26
+            report.to_excel(
+                writer,
+                sheet_name=sheet_name,
+                index=False,
+                startrow=2,
+            )
+            worksheet = writer.sheets[sheet_name]
+            worksheet.freeze_panes = "A4"
+            worksheet.auto_filter.ref = f"A3:E{worksheet.max_row}"
+            worksheet.column_dimensions["A"].width = 15
+            for column in ("B", "D"):
+                worksheet.column_dimensions[column].width = 22
+                for cell in worksheet[column][3:]:
+                    cell.number_format = '0.00"%"'
+            for column in ("C", "E"):
+                worksheet.column_dimensions[column].width = 28
+                for cell in worksheet[column][3:]:
+                    cell.number_format = "#,##0.000"
+            for cell in worksheet["A"][3:]:
+                cell.number_format = "DD-MM-YYYY"
+    return output.getvalue()
+
+
 excel_file = _first_existing(EXCEL_CANDIDATES)
 pyrevit_files = tuple(
     path for path in PYREVIT_CANDIDATES if path.is_file() and path.stat().st_size > 0
@@ -730,35 +867,70 @@ with tab_curve:
                 details["dias"] = row.get("N° días hábiles (calc.)")
 
         try:
+            export_start = pd.Timestamp("2026-08-24")
+            export_end = pd.Timestamp(date.today())
             daily_reports = generar_reporte_diario_partidas(
                 scope,
                 export_schedules,
                 export_codes,
-                pd.Timestamp("2026-08-24"),
-                pd.Timestamp(date.today()),
+                export_start,
+                export_end,
             )
-            if daily_reports:
-                workbook = _build_excel_export(daily_reports, export_codes)
-                st.download_button(
-                    "Descargar Excel con evolución diaria",
-                    data=workbook,
-                    file_name=(
-                        f"avance_diario_partidas_2026-08-24_al_"
-                        f"{date.today():%Y-%m-%d}.xlsx"
-                    ),
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument."
-                        "spreadsheetml.sheet"
-                    ),
-                    key="jefatura_download_daily_progress",
-                )
-                st.caption(
-                    f"El libro incluye {len(daily_reports)} partidas con cantidades BIM, "
-                    "desde el 24-08-2026 hasta hoy. Los porcentajes corresponden al "
-                    "avance diario respecto de la cantidad total de cada partida."
-                )
-            else:
-                st.info("No hay partidas con cantidad BIM y actividad programada para exportar.")
+            global_reports = _build_global_daily_reports(
+                scope,
+                model_item_summary,
+                export_schedules,
+                export_codes,
+                export_start,
+                export_end,
+            )
+            download_columns = st.columns(2)
+            with download_columns[0]:
+                if daily_reports:
+                    workbook = _build_excel_export(daily_reports, export_codes)
+                    st.download_button(
+                        "Descargar Excel con avance diario de partidas",
+                        data=workbook,
+                        file_name=(
+                            f"avance_diario_partidas_2026-08-24_al_"
+                            f"{date.today():%Y-%m-%d}.xlsx"
+                        ),
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet"
+                        ),
+                        key="jefatura_download_daily_progress",
+                    )
+                    st.caption(
+                        f"El libro incluye {len(daily_reports)} partidas con cantidades BIM, "
+                        "desde el 24-08-2026 hasta hoy. Los porcentajes corresponden al "
+                        "avance diario respecto de la cantidad total de cada partida."
+                    )
+                else:
+                    st.info("No hay partidas con cantidad BIM y actividad programada para exportar.")
+            with download_columns[1]:
+                if global_reports:
+                    global_workbook = _build_global_excel_export(global_reports)
+                    st.download_button(
+                        "Descargar Excel Global",
+                        data=global_workbook,
+                        file_name=(
+                            f"avance_global_todas_las_partidas_2026-08-24_al_"
+                            f"{date.today():%Y-%m-%d}.xlsx"
+                        ),
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet"
+                        ),
+                        key="jefatura_download_global_daily_progress",
+                    )
+                    st.caption(
+                        "Incluye hojas separadas para m², m³, ml y unitario. "
+                        "Los porcentajes diarios se calculan sobre la cantidad BIM "
+                        "total de cada unidad."
+                    )
+                else:
+                    st.info("No hay cantidades BIM disponibles para generar el avance global.")
         except Exception as exc:
             st.error(f"No fue posible generar el Excel de avance diario: {exc}")
     else:
