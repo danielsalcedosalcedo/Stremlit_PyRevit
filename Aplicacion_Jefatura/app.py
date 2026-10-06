@@ -190,8 +190,20 @@ def _filtered_as_of(df: pd.DataFrame, cutoff: date) -> pd.DataFrame:
 
 def _build_item_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Resume el avance por Assembly Code, respetando la unidad de cada montaje."""
+    columns = [
+        "ITEM",
+        "assembly_code",
+        "assembly_description",
+        "Nombre de tarea",
+        "Unidad",
+        "Cantidad total",
+        "Cantidad ejecutada",
+        "pct_ejecutado",
+        "Elementos",
+        "Elementos ejecutados",
+    ]
     if df.empty or "assembly_code" not in df.columns:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=columns)
 
     rows = []
     for code, group in df.groupby("assembly_code", dropna=True):
@@ -223,7 +235,9 @@ def _build_item_summary(df: pd.DataFrame) -> pd.DataFrame:
             "Elementos ejecutados": int(executed.sum()),
         })
 
-    return pd.DataFrame(rows).sort_values("pct_ejecutado", ascending=True) if rows else pd.DataFrame()
+    return pd.DataFrame(rows, columns=columns).sort_values(
+        "pct_ejecutado", ascending=True
+    )
 
 
 def _build_weighted_global_curve(
@@ -666,8 +680,9 @@ with tab_curve:
         )
         if unit_total <= 0:
             st.warning(
-                f"La exportación BIM no contiene cantidades clasificadas como "
-                f"{unit_labels[selected_unit]}; no se puede calcular esa curva."
+                f"Los datos BIM del filtro actual no contienen cantidades mayores que "
+                f"cero clasificadas como {unit_labels[selected_unit]}; no se puede "
+                "calcular esa curva."
             )
 
     curve_scope = scope
