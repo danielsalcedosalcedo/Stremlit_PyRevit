@@ -382,7 +382,6 @@ def calcular_comparativo_cantidades_periodo(
         scheduled_days_by_code.setdefault(code, []).extend(workdays.tolist())
 
     planned_by_date: dict[pd.Timestamp, dict[str, float]] = {}
-    real_by_date: dict[pd.Timestamp, dict[str, float]] = {}
     if "assembly_code" in df_pyrevit.columns:
         assembly_codes = df_pyrevit["assembly_code"].astype(str).str.strip()
         for code, workdays in scheduled_days_by_code.items():
@@ -407,23 +406,20 @@ def calcular_comparativo_cantidades_periodo(
                     day_values.get(quantity_unit, 0.0) + quantity_per_day
                 )
 
-            real_item = calcular_curva_s_real_pyrevit(
-                matching_elements,
-                frecuencia="D",
-                fecha_corte=fecha_corte,
-                unidad=item_unit,
+    real_by_date: dict[pd.Timestamp, dict[str, float]] = {}
+    if unidad in {"m2", "m3", "ml", "unid"}:
+        quantity_unit = "unidades" if unidad == "unid" else unidad
+        for _, row in real_curve.iterrows():
+            day = pd.to_datetime(row["fecha"], errors="coerce")
+            if pd.isna(day):
+                continue
+            day = day.normalize()
+            if day < chart_start:
+                continue
+            day_values = real_by_date.setdefault(day, {})
+            day_values[quantity_unit] = day_values.get(quantity_unit, 0.0) + float(
+                row["cantidad_ejecutada_periodo"]
             )
-            for _, row in real_item.iterrows():
-                day = pd.to_datetime(row["fecha"], errors="coerce")
-                if pd.isna(day):
-                    continue
-                day = day.normalize()
-                if day < chart_start:
-                    continue
-                day_values = real_by_date.setdefault(day, {})
-                day_values[quantity_unit] = day_values.get(quantity_unit, 0.0) + float(
-                    row["cantidad_ejecutada_periodo"]
-                )
 
     unit_labels = {
         "m2": "m²",
