@@ -414,8 +414,6 @@ def calcular_comparativo_cantidades_periodo(
             if pd.isna(day):
                 continue
             day = day.normalize()
-            if day < chart_start:
-                continue
             day_values = real_by_date.setdefault(day, {})
             day_values[quantity_unit] = day_values.get(quantity_unit, 0.0) + float(
                 row["cantidad_ejecutada_periodo"]
@@ -430,7 +428,9 @@ def calcular_comparativo_cantidades_periodo(
 
     if frecuencia == "D":
         planned_dates = pd.to_datetime(planned_curve["fecha"], errors="coerce").dropna()
-        period_start = pd.Timestamp("2026-08-24")
+        period_start = min(
+            [chart_start, *real_by_date]
+        )
         all_dates = [period_start, planned_dates.max().normalize()]
         all_dates.extend(real_by_date)
         period_end = max(all_dates)
@@ -526,7 +526,12 @@ def calcular_comparativo_cantidades_periodo(
         for week_start in week_starts:
             period_end = week_start + pd.Timedelta(days=6)
             label = labels_by_start.get(week_start)
-            if label is None and first_scheduled_week is not None and first_week_number is not None:
+            if (
+                label is None
+                and first_scheduled_week is not None
+                and first_week_number is not None
+                and week_start >= first_scheduled_week
+            ):
                 offset = (week_start - first_scheduled_week).days // 7
                 label = f"S{first_week_number + offset:02d}"
             if label is None:
