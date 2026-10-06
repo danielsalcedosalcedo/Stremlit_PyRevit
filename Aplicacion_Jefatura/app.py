@@ -188,8 +188,11 @@ def _filtered_as_of(df: pd.DataFrame, cutoff: date) -> pd.DataFrame:
     return result.loc[keep].copy()
 
 
-def _build_item_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Resume el avance por Assembly Code, respetando la unidad de cada montaje."""
+def _build_item_summary(
+    df: pd.DataFrame,
+    progress_as_of: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Resume cantidades del alcance completo y avance opcional a una fecha de corte."""
     columns = [
         "ITEM",
         "assembly_code",
@@ -216,8 +219,17 @@ def _build_item_summary(df: pd.DataFrame) -> pd.DataFrame:
             modes = group["assembly_description"].dropna().astype(str).mode()
             description = modes.iloc[0] if not modes.empty else ""
 
-        executed = group["ejecutado"].fillna(False).astype(bool) if "ejecutado" in group else pd.Series(False, index=group.index)
-        done = group.loc[executed]
+        progress_group = group
+        if progress_as_of is not None:
+            progress_group = progress_as_of.loc[
+                progress_as_of["assembly_code"].astype(str).str.strip() == code_text
+            ]
+        executed = (
+            progress_group["ejecutado"].fillna(False).astype(bool)
+            if "ejecutado" in progress_group
+            else pd.Series(False, index=progress_group.index)
+        )
+        done = progress_group.loc[executed]
         unit = detectar_unidad_pyrevit(group)
         total = float(extraer_cantidad_pyrevit(group, unit).sum())
         quantity_done = float(extraer_cantidad_pyrevit(done, unit).sum())
@@ -628,7 +640,7 @@ if selected_contractor != "Todos" and "ei_subcontratista" in scope.columns:
 
 as_of = _filtered_as_of(scope, cutoff)
 model_item_summary = _build_item_summary(scope)
-item_summary = _build_item_summary(as_of)
+item_summary = _build_item_summary(scope, progress_as_of=as_of)
 st.markdown('<div class="section-title">Análisis ejecutivo</div>', unsafe_allow_html=True)
 tab_curve, tab_items = st.tabs(["Curva de avance", "Partidas / códigos"])
 
