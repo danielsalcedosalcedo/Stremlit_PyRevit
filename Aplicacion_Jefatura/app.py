@@ -90,10 +90,15 @@ DEMOLICIONES_EXCEL_CANDIDATES = (
 HORMIGONES_EXCEL_CANDIDATES = (
     ROOT_DIR / "Hormigones_Avance.xlsx",
 )
-PYREVIT_CANDIDATES = (
+DEMOLICIONES_PYREVIT_CANDIDATES = (
     ROOT_DIR / "data" / "pyrevit_elementos_detallados.json",
     ROOT_DIR / "Aplicacion_pyRevit" / "data" / "pyrevit_elementos_detallados.json",
     ROOT_DIR / "data" / "pyrevit_elementos_detallados.csv",
+)
+HORMIGONES_PYREVIT_CANDIDATES = (
+    ROOT_DIR / "data" / "pyrevit_elementos_detallados_hormigones.json",
+    ROOT_DIR / "Aplicacion_pyRevit" / "data" / "pyrevit_elementos_detallados_hormigones.json",
+    ROOT_DIR / "data" / "pyrevit_elementos_detallados_hormigones.csv",
 )
 
 
@@ -562,11 +567,15 @@ def _build_global_excel_export(reports: dict[str, pd.DataFrame]) -> bytes:
     return output.getvalue()
 
 
-def render_dashboard(excel_candidates: tuple[Path, ...], dashboard_key: str) -> None:
+def render_dashboard(
+    excel_candidates: tuple[Path, ...],
+    pyrevit_candidates: tuple[Path, ...],
+    dashboard_key: str,
+) -> None:
     cutoff = date.today()
     excel_file = _first_existing(excel_candidates)
     pyrevit_files = tuple(
-        path for path in PYREVIT_CANDIDATES if path.is_file() and path.stat().st_size > 0
+        path for path in pyrevit_candidates if path.is_file() and path.stat().st_size > 0
     )
     loaded = _load_local_data(
         str(excel_file) if excel_file else None,
@@ -577,19 +586,27 @@ def render_dashboard(excel_candidates: tuple[Path, ...], dashboard_key: str) -> 
     for error in loaded["errores"]:
         st.warning(error)
 
+    if loaded["df_datos"] is None or "ITEM" not in loaded["df_datos"].columns:
+        st.error("El Excel asignado a esta pestaña no contiene datos BIM con una columna ITEM.")
+        return
+
+    excel_codes = set(
+        loaded["df_datos"]["ITEM"].dropna().astype(str).str.strip()
+    )
+    if not excel_codes:
+        st.info("El Excel asignado a esta pestaña no contiene códigos ITEM para vincular con BIM.")
+        return
+
     raw_pyrevit = loaded["df_pyrevit"]
     if raw_pyrevit is None or raw_pyrevit.empty:
         st.error("No hay datos BIM para mostrar. La aplicación no tiene carga manual: verifica la exportación automática en la carpeta data.")
         st.markdown(
-            '<div class="info-box">Incluye y confirma en GitHub una exportación con registros en '
-            '<b>data/pyrevit_elementos_detallados.json</b>, '
-            '<b>Aplicacion_pyRevit/data/pyrevit_elementos_detallados.json</b> o '
-            '<b>data/pyrevit_elementos_detallados.csv</b>. Luego reinicia la app para que Streamlit Cloud '
-            'descargue el último commit.</div>',
+            '<div class="info-box">Incluye una exportación PyRevit exclusiva para esta pestaña '
+            'en una de las rutas indicadas. Cada pestaña consulta su propio archivo BIM.</div>',
             unsafe_allow_html=True,
         )
         with st.expander("Rutas BIM revisadas"):
-            st.code("\n".join(str(path.relative_to(ROOT_DIR)) for path in PYREVIT_CANDIDATES))
+            st.code("\n".join(str(path.relative_to(ROOT_DIR)) for path in pyrevit_candidates))
         return
 
     if "assembly_code" not in raw_pyrevit.columns:
@@ -610,6 +627,13 @@ def render_dashboard(excel_candidates: tuple[Path, ...], dashboard_key: str) -> 
             ["Todos"] + contractor_values,
             key=f"{dashboard_key}_contractor",
         )
+
+    raw_pyrevit = raw_pyrevit[
+        raw_pyrevit["assembly_code"].astype(str).str.strip().isin(excel_codes)
+    ].copy()
+    if raw_pyrevit.empty:
+        st.info("La exportación BIM de esta pestaña no tiene códigos presentes en su Excel.")
+        return
 
     scope = raw_pyrevit.copy()
     if selected_zone != "Todas" and "ei_zona" in scope.columns:
@@ -995,9 +1019,17 @@ st.markdown(
 
 tab_demoliciones, tab_hormigones = st.tabs(["Demoliciones", "Hormigones"])
 with tab_demoliciones:
-    render_dashboard(DEMOLICIONES_EXCEL_CANDIDATES, "demoliciones")
+    render_dashboard(
+        DEMOLICIONES_EXCEL_CANDIDATES,
+        DEMOLICIONES_PYREVIT_CANDIDATES,
+        "demoliciones",
+    )
 with tab_hormigones:
-    render_dashboard(HORMIGONES_EXCEL_CANDIDATES, "hormigones")
+    render_dashboard(
+        HORMIGONES_EXCEL_CANDIDATES,
+        HORMIGONES_PYREVIT_CANDIDATES,
+        "hormigones",
+    )
 
 st.markdown(
     '<div class="footer">© Desarrollado por Daniel Salcedo Salcedo 2026-Coordinador BIM · Datos consultados automáticamente desde las fuentes locales del proyecto.</div>',
