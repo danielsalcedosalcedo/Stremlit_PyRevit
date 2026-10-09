@@ -95,11 +95,7 @@ DEMOLICIONES_PYREVIT_CANDIDATES = (
     ROOT_DIR / "Aplicacion_pyRevit" / "data" / "pyrevit_elementos_detallados.json",
     ROOT_DIR / "data" / "pyrevit_elementos_detallados.csv",
 )
-HORMIGONES_PYREVIT_CANDIDATES = (
-    ROOT_DIR / "data" / "pyrevit_elementos_detallados_hormigones.json",
-    ROOT_DIR / "Aplicacion_pyRevit" / "data" / "pyrevit_elementos_detallados_hormigones.json",
-    ROOT_DIR / "data" / "pyrevit_elementos_detallados_hormigones.csv",
-)
+HORMIGONES_PYREVIT_CANDIDATES = DEMOLICIONES_PYREVIT_CANDIDATES
 
 
 def _first_existing(paths: tuple[Path, ...]) -> Path | None:
