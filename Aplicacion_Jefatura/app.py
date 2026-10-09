@@ -12,7 +12,8 @@ import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 import streamlit as st
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = Path(__file__).resolve().parent
+ROOT_DIR = APP_DIR if (APP_DIR / "data").is_dir() else APP_DIR.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from logic.charts import (  # noqa: E402
@@ -88,6 +89,7 @@ DEMOLICIONES_EXCEL_CANDIDATES = (
     ROOT_DIR / "Demoliciones_Avance.xlsx",
 )
 HORMIGONES_EXCEL_CANDIDATES = (
+    ROOT_DIR / "data" / "programado" / "Hormigones_Avance.xlsx",
     ROOT_DIR / "Hormigones_Avance.xlsx",
 )
 DEMOLICIONES_PYREVIT_CANDIDATES = (
