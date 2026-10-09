@@ -460,6 +460,105 @@ def _apply_plotly_layout(fig, title_text):
     return fig
 
 
+def _weekly_range_bounds(df_prog: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Timestamp] | None]:
+    """Resuelve los rangos semanales, incluidos los que cruzan de año."""
+    months = {
+        "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+        "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12,
+    }
+    pattern = re.compile(
+        r"(\d{1,2})-([a-zñ]{3})\s+al\s+(\d{1,2})-([a-zñ]{3})"
+    )
+    anchor = pd.Timestamp("2026-08-24")
+    previous_start = None
+    bounds = []
+
+    for week_range in df_prog.get("semana_rango", []):
+        match = pattern.search(str(week_range).lower())
+        if not match:
+            bounds.append(None)
+            continue
+
+        start_day, start_month, end_day, end_month = match.groups()
+        start_month_num = months.get(start_month)
+        end_month_num = months.get(end_month)
+        if start_month_num is None or end_month_num is None:
+            bounds.append(None)
+            continue
+
+        reference = previous_start + pd.Timedelta(days=7) if previous_start is not None else anchor
+        start_candidates = [
+            pd.Timestamp(year, start_month_num, int(start_day))
+            for year in range(reference.year - 1, reference.year + 2)
+        ]
+        start = min(start_candidates, key=lambda value: abs(value - reference))
+        end_year = start.year + int(end_month_num < start_month_num)
+        end = pd.Timestamp(end_year, end_month_num, int(end_day))
+        if end < start:
+            bounds.append(None)
+            continue
+
+        bounds.append((start, end))
+        previous_start = start
+
+    return bounds
+
+
+def _extend_weekly_curve_to_real(
+    df_prog: pd.DataFrame,
+    df_real: pd.DataFrame,
+) -> pd.DataFrame:
+    """Agrega semanas sin programa hasta cubrir la fecha real más reciente."""
+    if df_prog.empty or df_real is None or df_real.empty or "fecha" not in df_real:
+        return df_prog
+
+    real_dates = pd.to_datetime(df_real["fecha"], dayfirst=True, errors="coerce").dropna()
+    if real_dates.empty:
+        return df_prog
+
+    bounds = _weekly_range_bounds(df_prog)
+    valid_bounds = [bound for bound in bounds if bound is not None]
+    if not valid_bounds:
+        return df_prog
+
+    last_start, last_end = valid_bounds[-1]
+    latest_real_date = real_dates.max().normalize()
+    if latest_real_date <= last_end:
+        return df_prog
+
+    extended = df_prog.copy()
+    last_label = str(extended.iloc[-1].get("semana_label", ""))
+    label_match = re.search(r"^(.*?)(\d+)$", last_label)
+    label_prefix = label_match.group(1) if label_match else "S"
+    week_number = int(label_match.group(2)) if label_match else len(extended)
+    previous_value = float(extended.iloc[-1].get("acumulado", 0.0))
+    new_rows = []
+
+    while last_end < latest_real_date:
+        last_start += pd.Timedelta(days=7)
+        last_end = last_start + pd.Timedelta(days=6)
+        week_number += 1
+        label = f"{label_prefix}{week_number:02d}"
+        week_range = (
+            f"{last_start.day:02d}-{_SPANISH_MONTHS[last_start.month - 1]} "
+            f"al {last_end.day:02d}-{_SPANISH_MONTHS[last_end.month - 1]}"
+        )
+        row = {column: None for column in extended.columns}
+        if "semana" in row:
+            row["semana"] = f"{label}\n{week_range}"
+        if "semana_label" in row:
+            row["semana_label"] = label
+        if "semana_rango" in row:
+            row["semana_rango"] = week_range
+        if "parcial" in row:
+            row["parcial"] = 0.0
+        if "acumulado" in row:
+            row["acumulado"] = previous_value
+        new_rows.append(row)
+
+    return pd.concat([extended, pd.DataFrame(new_rows)], ignore_index=True)
+
+
 def _alinear_real_con_semanas(df_prog: pd.DataFrame, df_real: pd.DataFrame):
     """
     Alinea los valores reales de PyRevit con las semanas de df_prog.
@@ -471,18 +570,13 @@ def _alinear_real_con_semanas(df_prog: pd.DataFrame, df_real: pd.DataFrame):
 
     x_labels = df_prog["semana_label"].tolist() if "semana_label" in df_prog.columns else list(df_prog["semana"].astype(str))
 
-    import re
-    meses = {"ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6, "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12}
-    semana_ends = []
-
-    for r in df_prog.get("semana_rango", []):
-        m = re.search(r"al\s+(\d{1,2})-([a-z]{3})", str(r).lower())
-        if m:
-            d = int(m.group(1))
-            mon = meses.get(m.group(2), 9)
-            semana_ends.append(pd.Timestamp(year=2026, month=mon, day=d, hour=23, minute=59, second=59))
-        else:
-            semana_ends.append(None)
+    semana_bounds = _weekly_range_bounds(df_prog)
+    semana_ends = [
+        bound[1] + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        if bound is not None
+        else None
+        for bound in semana_bounds
+    ]
 
     df_r = df_real.copy()
     if "fecha" in df_r.columns:
@@ -644,6 +738,8 @@ def grafico_curva_s_semanal_plotly(df_prog: pd.DataFrame,
                         [pd.DataFrame(prefix_rows), df_prog],
                         ignore_index=True,
                     )
+
+    df_prog = _extend_weekly_curve_to_real(df_prog, df_real_pyrevit)
 
     fig = go.Figure()
     x_labels = df_prog["semana_label"].tolist() if "semana_label" in df_prog.columns else list(range(len(df_prog)))
