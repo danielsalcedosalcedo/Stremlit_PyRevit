@@ -12,8 +12,7 @@ import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 import streamlit as st
 
-APP_DIR = Path(__file__).resolve().parent
-ROOT_DIR = APP_DIR if (APP_DIR / "data").is_dir() else APP_DIR.parent
+ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from logic.charts import (  # noqa: E402
@@ -89,19 +88,44 @@ DEMOLICIONES_EXCEL_CANDIDATES = (
     ROOT_DIR / "Demoliciones_Avance.xlsx",
 )
 HORMIGONES_EXCEL_CANDIDATES = (
-    ROOT_DIR / "data" / "programado" / "Hormigones_Avance.xlsx",
     ROOT_DIR / "Hormigones_Avance.xlsx",
+)
+EEMM_EXCEL_CANDIDATES = (
+    ROOT_DIR / "EEMM_Avance.xlsx",
 )
 DEMOLICIONES_PYREVIT_CANDIDATES = (
     ROOT_DIR / "data" / "pyrevit_elementos_detallados.json",
     ROOT_DIR / "Aplicacion_pyRevit" / "data" / "pyrevit_elementos_detallados.json",
     ROOT_DIR / "data" / "pyrevit_elementos_detallados.csv",
 )
-HORMIGONES_PYREVIT_CANDIDATES = DEMOLICIONES_PYREVIT_CANDIDATES
+HORMIGONES_PYREVIT_CANDIDATES = (
+    ROOT_DIR / "data" / "pyrevit_elementos_detallados_hormigones.json",
+    ROOT_DIR / "Aplicacion_pyRevit" / "data" / "pyrevit_elementos_detallados_hormigones.json",
+    ROOT_DIR / "data" / "pyrevit_elementos_detallados_hormigones.csv",
+)
+EEMM_IFC_DIRECTORY = ROOT_DIR / "data" / "Modelos IFC"
 
 
 def _first_existing(paths: tuple[Path, ...]) -> Path | None:
     return next((path for path in paths if path.is_file() and path.stat().st_size > 0), None)
+
+
+@st.cache_data(show_spinner=False)
+def _load_ifc_data(
+    ifc_path: str,
+    modified_at: float,
+    include_geometry: bool,
+    visible_ids: tuple[int, ...] = (),
+) -> dict:
+    """Carga propiedades IFC y cachea geometría hasta que cambia el archivo."""
+    del modified_at
+    from logic.ifc_viewer import load_ifc_model
+
+    return load_ifc_model(
+        ifc_path,
+        include_geometry=include_geometry,
+        element_ids=set(visible_ids) if include_geometry else None,
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -110,6 +134,7 @@ def _load_local_data(
     excel_mtime: float,
     pyrevit_paths: tuple[str, ...],
     pyrevit_mtimes: tuple[float, ...],
+    require_pyrevit: bool = True,
 ) -> dict:
     """Lee las fuentes fijas y renueva la caché cuando cambia su fecha de modificación."""
     del excel_mtime, pyrevit_mtimes  # Se conservan como parte de la clave de caché.
@@ -132,6 +157,9 @@ def _load_local_data(
                 result["avance_diario"] = load_avance_diario(excel_path)
         except Exception as exc:
             result["errores"].append(f"No se pudo leer el Excel programado: {exc}")
+
+    if not require_pyrevit:
+        return result
 
     if pyrevit_paths:
         errores_pyrevit = []
@@ -196,6 +224,7 @@ def _filtered_as_of(df: pd.DataFrame, cutoff: date) -> pd.DataFrame:
 def _build_item_summary(
     df: pd.DataFrame,
     progress_as_of: pd.DataFrame | None = None,
+    unit_override: str | None = None,
 ) -> pd.DataFrame:
     """Resume cantidades del alcance completo y avance opcional a una fecha de corte."""
     columns = [
@@ -235,7 +264,7 @@ def _build_item_summary(
             else pd.Series(False, index=progress_group.index)
         )
         done = progress_group.loc[executed]
-        unit = detectar_unidad_pyrevit(group)
+        unit = unit_override or detectar_unidad_pyrevit(group)
         total = float(extraer_cantidad_pyrevit(group, unit).sum())
         quantity_done = float(extraer_cantidad_pyrevit(done, unit).sum())
         pct = min(100.0, quantity_done / total * 100) if total > 0 else 0.0
@@ -435,6 +464,7 @@ def _build_global_daily_reports(
     codes_by_activity: dict[str, str],
     fecha_inicio: pd.Timestamp,
     fecha_fin: pd.Timestamp,
+    unit_labels: dict[str, str] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Genera avances diarios globales separados por unidad BIM."""
     start_date = pd.Timestamp(fecha_inicio).normalize()
@@ -443,7 +473,9 @@ def _build_global_daily_reports(
         raise ValueError("La fecha inicial del reporte no puede ser posterior a la fecha final.")
 
     dates = pd.date_range(start_date, end_date, freq="D")
-    unit_labels = {"m2": "m²", "m3": "m³", "ml": "ml", "unid": "unitario"}
+    unit_labels = unit_labels or {
+        "m2": "m²", "m3": "m³", "ml": "ml", "unid": "unitario"
+    }
     if item_summary.empty:
         return {}
 
@@ -530,7 +562,9 @@ def _build_global_daily_reports(
 def _build_global_excel_export(reports: dict[str, pd.DataFrame]) -> bytes:
     """Construye un libro Excel global con una hoja por unidad."""
     output = io.BytesIO()
-    unit_sheets = {"m2": "m2", "m3": "m3", "ml": "ml", "unid": "unitario"}
+    unit_sheets = {
+        "m2": "m2", "m3": "m3", "ml": "ml", "kg": "kg", "unid": "unitario"
+    }
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for unit, report in reports.items():
             sheet_name = unit_sheets[unit]
@@ -569,9 +603,29 @@ def render_dashboard(
     excel_candidates: tuple[Path, ...],
     pyrevit_candidates: tuple[Path, ...],
     dashboard_key: str,
+    forced_unit: str | None = None,
+    ifc_directory: Path | None = None,
 ) -> None:
     cutoff = date.today()
     excel_file = _first_existing(excel_candidates)
+    ifc_files = (
+        tuple(sorted(ifc_directory.glob("*.ifc"), key=lambda path: path.name.casefold()))
+        if ifc_directory and ifc_directory.is_dir()
+        else ()
+    )
+    selected_ifc = None
+    if ifc_directory:
+        if not ifc_files:
+            st.error(f"No se encontraron modelos IFC en {ifc_directory}.")
+            return
+        selected_ifc = st.selectbox(
+            "Modelo IFC",
+            options=ifc_files,
+            index=ifc_files.index(min(ifc_files, key=lambda path: path.stat().st_size)),
+            format_func=lambda path: path.name,
+            key=f"{dashboard_key}_ifc_model",
+        )
+
     pyrevit_files = tuple(
         path for path in pyrevit_candidates if path.is_file() and path.stat().st_size > 0
     )
@@ -580,6 +634,31 @@ def render_dashboard(
         excel_file.stat().st_mtime if excel_file else 0.0,
         tuple(str(path) for path in pyrevit_files),
         tuple(path.stat().st_mtime for path in pyrevit_files),
+        require_pyrevit=ifc_directory is None,
+    )
+    try:
+        ifc_model = (
+            _load_ifc_data(
+                str(selected_ifc), selected_ifc.stat().st_mtime, include_geometry=False
+            )
+            if selected_ifc
+            else None
+        )
+    except Exception as exc:
+        st.error(f"No fue posible leer el modelo IFC {selected_ifc.name}: {exc}")
+        return
+    ifc_records = (
+        pd.DataFrame(
+            ifc_model["records"],
+            columns=[
+                "ifc_id", "global_id", "assembly_code", "assembly_description",
+                "nombre", "kg", "cantidad_total", "unidad", "ejecutado",
+                "ei_zona", "ei_subcontratista", "ei_semana",
+                "ei_planificacion_obra", "ei_fecha_ejecucion", "fecha",
+            ],
+        )
+        if ifc_model is not None
+        else pd.DataFrame()
     )
     for error in loaded["errores"]:
         st.warning(error)
@@ -591,12 +670,12 @@ def render_dashboard(
     excel_codes = set(
         loaded["df_datos"]["ITEM"].dropna().astype(str).str.strip()
     )
-    if not excel_codes:
+    if not excel_codes and ifc_directory is None:
         st.info("El Excel asignado a esta pestaña no contiene códigos ITEM para vincular con BIM.")
         return
 
-    raw_pyrevit = loaded["df_pyrevit"]
-    if raw_pyrevit is None or raw_pyrevit.empty:
+    raw_pyrevit = ifc_records if ifc_model is not None else loaded["df_pyrevit"]
+    if (raw_pyrevit is None or raw_pyrevit.empty) and ifc_directory is None:
         st.error("No hay datos BIM para mostrar. La aplicación no tiene carga manual: verifica la exportación automática en la carpeta data.")
         st.markdown(
             '<div class="info-box">Incluye una exportación PyRevit exclusiva para esta pestaña '
@@ -607,7 +686,9 @@ def render_dashboard(
             st.code("\n".join(str(path.relative_to(ROOT_DIR)) for path in pyrevit_candidates))
         return
 
-    if "assembly_code" not in raw_pyrevit.columns:
+    if raw_pyrevit is None:
+        raw_pyrevit = pd.DataFrame()
+    if "assembly_code" not in raw_pyrevit.columns and ifc_directory is None:
         st.error("La exportación encontrada no contiene el campo de Código de montaje (assembly_code).")
         return
 
@@ -626,12 +707,24 @@ def render_dashboard(
             key=f"{dashboard_key}_contractor",
         )
 
-    raw_pyrevit = raw_pyrevit[
-        raw_pyrevit["assembly_code"].astype(str).str.strip().isin(excel_codes)
-    ].copy()
-    if raw_pyrevit.empty:
+    if ifc_model is None:
+        raw_pyrevit = raw_pyrevit[
+            raw_pyrevit["assembly_code"].astype(str).str.strip().isin(excel_codes)
+        ].copy()
+    elif excel_codes:
+        raw_pyrevit = raw_pyrevit[
+            raw_pyrevit["assembly_code"].astype(str).str.strip().isin(excel_codes)
+        ].copy()
+    else:
+        raw_pyrevit = raw_pyrevit.iloc[0:0].copy()
+    if raw_pyrevit.empty and ifc_model is None:
         st.info("La exportación BIM de esta pestaña no tiene códigos presentes en su Excel.")
         return
+    if raw_pyrevit.empty and ifc_model is not None:
+        st.info(
+            "Los IFC aún no contienen Códigos de montaje vinculados al Excel. "
+            "El visor se puede usar; agrega los parámetros BIM para habilitar los filtros y avances."
+        )
 
     scope = raw_pyrevit.copy()
     if selected_zone != "Todas" and "ei_zona" in scope.columns:
@@ -640,10 +733,16 @@ def render_dashboard(
         scope = scope[scope["ei_subcontratista"].astype(str) == selected_contractor]
 
     as_of = _filtered_as_of(scope, cutoff)
-    model_item_summary = _build_item_summary(scope)
-    item_summary = _build_item_summary(scope, progress_as_of=as_of)
+    model_item_summary = _build_item_summary(scope, unit_override=forced_unit)
+    item_summary = _build_item_summary(
+        scope, progress_as_of=as_of, unit_override=forced_unit
+    )
     st.markdown('<div class="section-title">Análisis ejecutivo</div>', unsafe_allow_html=True)
-    tab_curve, tab_items = st.tabs(["Curva de avance", "Partidas / códigos"])
+    dashboard_tabs = st.tabs(
+        ["Curva de avance", "Partidas / códigos"]
+        + (["Modelo IFC"] if ifc_model is not None else [])
+    )
+    tab_curve, tab_items = dashboard_tabs[:2]
 
     with tab_curve:
         frequency_label = st.radio(
@@ -678,13 +777,23 @@ def render_dashboard(
         )
 
         unit_labels = {"m2": "m²", "m3": "m³", "ml": "ml", "unid": "unidades"}
+        if forced_unit:
+            unit_labels = {
+                forced_unit: (
+                    "Kg" if forced_unit == "kg" else unit_labels[forced_unit]
+                )
+            }
         selected_unit = None
         if chosen_activity is None:
             available_units = list(unit_labels)
             selected_unit = st.selectbox(
                 "Unidad de la curva global",
                 options=available_units,
-                index=available_units.index("m2"),
+                index=(
+                    available_units.index(forced_unit)
+                    if forced_unit
+                    else available_units.index("m2")
+                ),
                 format_func=lambda unit: unit_labels[unit],
                 key=f"{dashboard_key}_global_unit_{frequency}",
                 help="Cada curva global considera solo partidas de la unidad elegida.",
@@ -857,7 +966,10 @@ def render_dashboard(
                     )
         else:
             if not excel_file:
-                st.info("La curva programada aparecerá cuando exista el Excel en data/programado/Demoliciones_Avance.xlsx. La curva real BIM está disponible a continuación.")
+                st.info(
+                    f"La curva programada aparecerá cuando exista el Excel "
+                    f"{excel_candidates[0].name}. La curva real BIM está disponible a continuación."
+                )
             else:
                 st.info("El Excel encontrado no incluye una hoja de avance para esta frecuencia.")
             st.plotly_chart(
@@ -922,6 +1034,11 @@ def render_dashboard(
                     export_codes,
                     export_start,
                     export_end,
+                    unit_labels=(
+                        {forced_unit: unit_labels[forced_unit]}
+                        if forced_unit
+                        else None
+                    ),
                 )
                 download_columns = st.columns(2)
                 with download_columns[0]:
@@ -964,7 +1081,8 @@ def render_dashboard(
                             key=f"{dashboard_key}_download_global_daily_progress",
                         )
                         st.caption(
-                            "Incluye hojas separadas para m², m³, ml y unitario. "
+                            "Incluye hojas separadas para "
+                            f"{', '.join(unit_labels.values())}. "
                             "Los porcentajes diarios se calculan sobre la cantidad BIM "
                             "total de cada unidad."
                         )
@@ -991,6 +1109,7 @@ def render_dashboard(
                 "ITEM", "assembly_description", "Unidad", "Cantidad total", "Cantidad ejecutada",
                 "pct_ejecutado", "Elementos", "Elementos ejecutados",
             ]].rename(columns={"assembly_description": "Descripción", "pct_ejecutado": "% Avance"})
+            table["Unidad"] = table["Unidad"].replace({"kg": "Kg"})
             st.dataframe(
                 table,
                 use_container_width=True,
@@ -1007,6 +1126,114 @@ def render_dashboard(
                 key=f"{dashboard_key}_item_progress",
             )
 
+    if ifc_model is not None:
+        with dashboard_tabs[2]:
+            viewer_scope = ifc_records.copy()
+            if selected_zone != "Todas" and "ei_zona" in viewer_scope.columns:
+                viewer_scope = viewer_scope[
+                    viewer_scope["ei_zona"].astype(str) == selected_zone
+                ]
+            if (
+                selected_contractor != "Todos"
+                and "ei_subcontratista" in viewer_scope.columns
+            ):
+                viewer_scope = viewer_scope[
+                    viewer_scope["ei_subcontratista"].astype(str)
+                    == selected_contractor
+                ]
+            if excel_codes:
+                linked_elements = viewer_scope[
+                    viewer_scope["assembly_code"].astype(str).str.strip().isin(excel_codes)
+                ]
+                if not linked_elements.empty:
+                    viewer_scope = linked_elements
+
+            st.markdown("#### Visor IFC · elementos ejecutados en azul")
+            st.caption(
+                "El visor respeta los filtros de zona y subcontratista seleccionados arriba."
+            )
+            available_codes = sorted(
+                code for code in viewer_scope["assembly_code"].dropna()
+                .astype(str).str.strip().unique()
+                if code
+            )
+            visible_codes = st.multiselect(
+                "Filtrar códigos de montaje en el modelo",
+                options=available_codes,
+                default=[],
+                help="Sin selección se muestran todos los elementos del alcance filtrado.",
+                key=f"{dashboard_key}_ifc_codes",
+            )
+            if visible_codes:
+                viewer_scope = viewer_scope[
+                    viewer_scope["assembly_code"].astype(str).str.strip().isin(visible_codes)
+                ]
+            visible_ids = set(
+                pd.to_numeric(viewer_scope["ifc_id"], errors="coerce")
+                .dropna().astype(int)
+            )
+
+            executed_count = int(viewer_scope["ejecutado"].fillna(False).astype(bool).sum())
+            total_weight = pd.to_numeric(
+                viewer_scope["kg"], errors="coerce"
+            ).fillna(0).sum()
+            metric_columns = st.columns(3)
+            metric_columns[0].metric("Elementos visibles", f"{len(viewer_scope):,}")
+            metric_columns[1].metric("Elementos ejecutados", f"{executed_count:,}")
+            metric_columns[2].metric("Peso del alcance", f"{total_weight:,.2f} Kg")
+            missing_weights = int(viewer_scope["kg"].isna().sum())
+            if missing_weights:
+                st.warning(
+                    f"{missing_weights} elementos del alcance no tienen un peso "
+                    "numérico en la propiedad Weigth."
+                )
+            if not available_codes:
+                st.info(
+                    "Este IFC aún no tiene el parámetro Código de montaje. "
+                    "Los elementos se visualizarán en gris hasta agregar los parámetros de avance."
+                )
+            st.caption(
+                "Los elementos marcados como ejecutados se resaltan en azul; "
+                "los restantes se muestran en gris. Usa el mouse para rotar y acercar el modelo."
+            )
+            if st.checkbox(
+                "Cargar geometría 3D del IFC",
+                value=False,
+                key=f"{dashboard_key}_load_ifc_geometry",
+            ):
+                try:
+                    with st.spinner("Procesando geometría IFC..."):
+                        model_with_geometry = _load_ifc_data(
+                            str(selected_ifc),
+                            selected_ifc.stat().st_mtime,
+                            include_geometry=True,
+                            visible_ids=tuple(sorted(visible_ids)),
+                        )
+                    from logic.ifc_viewer import build_ifc_figure
+
+                    figure = build_ifc_figure(model_with_geometry, visible_ids)
+                    if figure.data:
+                        st.plotly_chart(
+                            figure,
+                            use_container_width=True,
+                            key=f"{dashboard_key}_ifc_viewer",
+                        )
+                    else:
+                        st.info(
+                            "No hay geometría visible para la combinación actual de filtros."
+                        )
+                    if model_with_geometry["elements_without_geometry"]:
+                        st.warning(
+                            f"{model_with_geometry['elements_without_geometry']} "
+                            "elementos IFC no tienen geometría renderizable."
+                        )
+                except Exception as exc:
+                    st.error(f"No fue posible visualizar el modelo IFC: {exc}")
+            else:
+                st.info(
+                    "Activa la casilla para procesar y mostrar la geometría 3D del modelo seleccionado."
+                )
+
 st.markdown(
     """<div class="jefatura-banner">
         <div class="source-pill">Dashboard ejecutivo · Control BIM</div>
@@ -1015,7 +1242,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_demoliciones, tab_hormigones = st.tabs(["Demoliciones", "Hormigones"])
+tab_demoliciones, tab_hormigones, tab_eemm = st.tabs(
+    ["Demoliciones", "Hormigones", "EEMM"]
+)
 with tab_demoliciones:
     render_dashboard(
         DEMOLICIONES_EXCEL_CANDIDATES,
@@ -1027,6 +1256,14 @@ with tab_hormigones:
         HORMIGONES_EXCEL_CANDIDATES,
         HORMIGONES_PYREVIT_CANDIDATES,
         "hormigones",
+    )
+with tab_eemm:
+    render_dashboard(
+        EEMM_EXCEL_CANDIDATES,
+        (),
+        "eemm",
+        forced_unit="kg",
+        ifc_directory=EEMM_IFC_DIRECTORY,
     )
 
 st.markdown(
