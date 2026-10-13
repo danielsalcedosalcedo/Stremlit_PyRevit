@@ -81,13 +81,13 @@ def load_ifc_model(
 
     for product in products:
         properties = _property_values(product)
-        weight = _as_quantity(properties.get("weight"))
-        description = _as_text(
-            properties.get("assembly_description")
-            or getattr(product, "Description", None)
-            or getattr(product, "Name", None)
-        )
+        description = _as_text(properties.get("assembly_description"))
         assembly_code = _as_text(properties.get("assembly_code"))
+        weight = (
+            _as_quantity(properties.get("weight"))
+            if assembly_code and description
+            else None
+        )
         execution_date = properties.get("ei_fecha_ejecucion")
         planning_status = properties.get("ei_planificacion_obra")
         records.append({
