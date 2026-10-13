@@ -92,7 +92,9 @@ def calcular_curva_s_diaria(datos_diario: dict, actividad: str = None) -> pd.Dat
 # VINCULACIÓN PYREVIT ↔ EXCEL (ITEM = ASSEMBLY CODE)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extraer_unidad_y_cantidad_de_desc(assembly_desc, m2=0.0, m3=0.0, ml=0.0, default_qty=1.0):
+def extraer_unidad_y_cantidad_de_desc(
+    assembly_desc, m2=0.0, m3=0.0, ml=0.0, default_qty=1.0, kg=0.0
+):
     """
     Determina la unidad objetivo y la cantidad correspondiente según la
     descripción de montaje (o texto equivalente).
@@ -102,6 +104,9 @@ def extraer_unidad_y_cantidad_de_desc(assembly_desc, m2=0.0, m3=0.0, ml=0.0, def
         d = ""
     else:
         d = str(assembly_desc).lower().strip()
+
+    if re.search(r"\bkg\b|\bkilogramos?\b", d):
+        return "kg", kg
 
     # Patrones para m2
     if any(pat in d for pat in ["m2", "m²", "sqm", "metro cuadrado", "metros cuadrados"]):
@@ -130,6 +135,22 @@ def extraer_unidad_y_cantidad_de_desc(assembly_desc, m2=0.0, m3=0.0, ml=0.0, def
         return "unid", default_qty
 
 
+def _normalizar_unidad(unidad: object) -> str | None:
+    """Normaliza etiquetas de unidad BIM a las claves internas del dashboard."""
+    text = str(unidad).strip().casefold().replace("²", "2").replace("³", "3")
+    aliases = {
+        "m2": "m2", "sqm": "m2",
+        "m3": "m3", "cum": "m3",
+        "ml": "ml", "m.l": "ml",
+        "kg": "kg", "kgs": "kg", "kilogram": "kg",
+        "kilograms": "kg", "kilogramo": "kg", "kilogramos": "kg",
+        "unid": "unid", "ud": "unid", "un": "unid",
+        "unidad": "unid", "unidades": "unid",
+        "unit": "unid", "units": "unid", "ea": "unid", "pza": "unid",
+    }
+    return aliases.get(text)
+
+
 def detectar_unidad_pyrevit(grupo: pd.DataFrame) -> str:
     """Determina la unidad de una partida sin mezclar magnitudes."""
     descripcion = ""
@@ -137,6 +158,9 @@ def detectar_unidad_pyrevit(grupo: pd.DataFrame) -> str:
         descripciones = grupo["assembly_description"].dropna().astype(str)
         if not descripciones.empty:
             descripcion = str(descripciones.mode().iloc[0]).casefold()
+
+    if re.search(r"\bkg\b|\bkilogramos?\b|\bkilograms?\b", descripcion):
+        return "kg"
 
     patrones = (
         ("m2", ("m2", "m²", "sqm", "metro cuadrado", "metros cuadrados")),
@@ -152,17 +176,11 @@ def detectar_unidad_pyrevit(grupo: pd.DataFrame) -> str:
     if "unidad" in grupo.columns:
         unidades = grupo["unidad"].dropna().astype(str).str.strip().str.casefold()
         if not unidades.empty:
-            unidad = unidades.mode().iloc[0].replace("²", "2").replace("³", "3")
-            alias = {
-                "m2": "m2", "sqm": "m2", "m3": "m3", "cum": "m3",
-                "ml": "ml", "m.l": "ml", "unid": "unid", "ud": "unid",
-                "un": "unid", "unidad": "unid", "unidades": "unid",
-                "unit": "unid", "units": "unid", "ea": "unid", "pza": "unid",
-            }
-            if unidad in alias:
-                return alias[unidad]
+            unidad = _normalizar_unidad(unidades.mode().iloc[0])
+            if unidad:
+                return unidad
 
-    for unidad in ("m2", "m3", "ml"):
+    for unidad in ("kg", "m2", "m3", "ml"):
         if unidad in grupo.columns:
             cantidad = pd.to_numeric(grupo[unidad], errors="coerce").fillna(0)
             if cantidad.sum() > 0:
@@ -176,12 +194,14 @@ def extraer_cantidad_pyrevit(grupo: pd.DataFrame, unidad: str) -> pd.Series:
         return pd.Series(1.0, index=grupo.index)
     if unidad in grupo.columns:
         return pd.to_numeric(grupo[unidad], errors="coerce").fillna(0.0)
-    if "cantidad_total" in grupo.columns and "unidad" in grupo.columns:
-        etiquetas = (
-            grupo["unidad"].astype(str).str.casefold()
-            .str.replace("²", "2").str.replace("³", "3")
-        )
-        if etiquetas.eq(unidad).any():
+    if "cantidad_total" in grupo.columns:
+        if "unidad" in grupo.columns:
+            matching_units = grupo["unidad"].map(_normalizar_unidad).eq(unidad)
+            if matching_units.any():
+                return pd.to_numeric(
+                    grupo["cantidad_total"], errors="coerce"
+                ).fillna(0.0).where(matching_units, 0.0)
+        elif detectar_unidad_pyrevit(grupo) == unidad:
             return pd.to_numeric(grupo["cantidad_total"], errors="coerce").fillna(0.0)
     return pd.Series(0.0, index=grupo.index)
 
@@ -315,9 +335,15 @@ def _detectar_columna_cantidad(df: pd.DataFrame) -> str:
     tiene_m2  = "m2"  in df.columns and df["m2"].sum()  > 0
     tiene_m3  = "m3"  in df.columns and df["m3"].sum()  > 0
     tiene_ml  = "ml"  in df.columns and df["ml"].sum()  > 0
+    tiene_kg  = "kg"  in df.columns and df["kg"].sum()  > 0
     tiene_qty = "cantidad_total" in df.columns
 
     # Decidir por descripción
+    if re.search(r"\bkg\b|\bkilogramos?\b|\bkilograms?\b", desc):
+        if tiene_kg:
+            return "kg"
+        if tiene_qty:
+            return "cantidad_total"
     if any(p in desc for p in ["[m2]", "m2", "m²", "sqm", "metro cuadrado"]):
         if tiene_m2:  return "m2"
     if any(p in desc for p in ["[m3]", "m3", "m³", "cum", "metro cubico", "metro cúbico"]):
@@ -325,7 +351,16 @@ def _detectar_columna_cantidad(df: pd.DataFrame) -> str:
     if any(p in desc for p in ["[ml]", "ml", "m.l", "linear", "metro lineal"]):
         if tiene_ml:  return "ml"
 
+    if "unidad" in df.columns:
+        unidades = df["unidad"].dropna().map(_normalizar_unidad)
+        if not unidades.empty and unidades.mode().iloc[0] == "kg":
+            if tiene_kg:
+                return "kg"
+            if tiene_qty:
+                return "cantidad_total"
+
     # Fallback geométrico
+    if tiene_kg:  return "kg"
     if tiene_m2:  return "m2"
     if tiene_m3:  return "m3"
     if tiene_ml:  return "ml"
@@ -390,7 +425,7 @@ def calcular_comparativo_cantidades_periodo(
                 continue
 
             item_unit = unidad or detectar_unidad_pyrevit(matching_elements)
-            if item_unit not in {"m2", "m3", "ml", "unid"}:
+            if item_unit not in {"m2", "m3", "ml", "kg", "unid"}:
                 continue
             quantity_unit = "unidades" if item_unit == "unid" else item_unit
             quantity_total = float(
@@ -407,7 +442,7 @@ def calcular_comparativo_cantidades_periodo(
                 )
 
     real_by_date: dict[pd.Timestamp, dict[str, float]] = {}
-    if unidad in {"m2", "m3", "ml", "unid"}:
+    if unidad in {"m2", "m3", "ml", "kg", "unid"}:
         quantity_unit = "unidades" if unidad == "unid" else unidad
         for _, row in real_curve.iterrows():
             day = pd.to_datetime(row["fecha"], errors="coerce")
@@ -423,6 +458,7 @@ def calcular_comparativo_cantidades_periodo(
         "m2": "m²",
         "m3": "m³",
         "ml": "ml",
+        "kg": "Kg",
         "unidades": "unidades",
     }
 
@@ -682,7 +718,7 @@ def calcular_curva_s_real_pyrevit(df_pyrevit: pd.DataFrame,
         return pd.DataFrame()
 
     if unidad is not None:
-        if unidad not in {"m2", "m3", "ml", "unid"}:
+        if unidad not in {"m2", "m3", "ml", "kg", "unid"}:
             raise ValueError(f"Unidad de curva no soportada: {unidad}")
         if "assembly_code" not in df_pyrevit.columns:
             return pd.DataFrame()
