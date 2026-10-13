@@ -696,8 +696,7 @@ def _current_week_label(df_prog: pd.DataFrame, today: date) -> str | None:
 
 def grafico_curva_s_semanal_plotly(df_prog: pd.DataFrame,
                                     titulo: str = "Curva S – Avance Semanal Programado vs Real",
-                                    df_real_pyrevit: pd.DataFrame = None,
-                                    visible_period: tuple[str, str] | None = None) -> go.Figure:
+                                    df_real_pyrevit: pd.DataFrame = None) -> go.Figure:
     df_prog = df_prog.copy()
     anchor = pd.Timestamp("2026-08-24")
     if not df_prog.empty and "semana_rango" in df_prog.columns:
@@ -783,16 +782,6 @@ def grafico_curva_s_semanal_plotly(df_prog: pd.DataFrame,
 
     _apply_plotly_layout(fig, titulo)
     fig.update_xaxes(tickfont=dict(size=8))
-    if visible_period is not None:
-        visible_labels = [
-            x_labels.index(label)
-            for label in visible_period
-            if label in x_labels
-        ]
-        if len(visible_labels) == 2:
-            fig.update_xaxes(
-                range=[min(visible_labels) - 0.5, max(visible_labels) + 0.5]
-            )
     fig.update_yaxes(title_text="Avance Acumulado %", range=[-5, 115], tickformat=".1f")
     current_week = _current_week_label(df_prog, date.today())
     if current_week is not None:
@@ -812,8 +801,7 @@ def grafico_curva_s_semanal_plotly(df_prog: pd.DataFrame,
 
 def grafico_curva_s_diaria_plotly(df_prog: pd.DataFrame,
                                    titulo: str = "Curva S – Avance Diario Programado vs Real",
-                                   df_real_pyrevit: pd.DataFrame = None,
-                                   visible_period: tuple[pd.Timestamp, pd.Timestamp] | None = None) -> go.Figure:
+                                   df_real_pyrevit: pd.DataFrame = None) -> go.Figure:
     fig = go.Figure()
     fechas = pd.to_datetime(df_prog["fecha"], errors="coerce")
     y_prog = df_prog["acumulado"].tolist()
@@ -868,18 +856,14 @@ def grafico_curva_s_diaria_plotly(df_prog: pd.DataFrame,
     ) else fechas
     all_dates = all_dates.dropna()
     if not all_dates.empty:
-        date_range = [
-            chart_start,
-            max(all_dates.max(), today),
-        ]
+        fig.update_xaxes(
+            range=[
+                chart_start,
+                max(all_dates.max(), today),
+            ]
+        )
     else:
-        date_range = [chart_start, today]
-    if visible_period is not None:
-        date_range = [
-            visible_period[0],
-            visible_period[1] + pd.Timedelta(days=1),
-        ]
-    fig.update_xaxes(range=date_range)
+        fig.update_xaxes(range=[chart_start, today])
     fig.add_trace(
         go.Scatter(
             x=[today, today],
