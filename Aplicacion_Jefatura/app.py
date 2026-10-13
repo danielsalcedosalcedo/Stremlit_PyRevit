@@ -91,6 +91,7 @@ HORMIGONES_EXCEL_CANDIDATES = (
     ROOT_DIR / "Hormigones_Avance.xlsx",
 )
 EEMM_EXCEL_CANDIDATES = (
+    ROOT_DIR / "data" / "programado" / "EEMM_Avance.xlsx",
     ROOT_DIR / "EEMM_Avance.xlsx",
 )
 DEMOLICIONES_PYREVIT_CANDIDATES = (
