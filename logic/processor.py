@@ -566,10 +566,11 @@ def calcular_comparativo_cantidades_periodo(
                 label is None
                 and first_scheduled_week is not None
                 and first_week_number is not None
-                and week_start >= first_scheduled_week
             ):
                 offset = (week_start - first_scheduled_week).days // 7
-                label = f"S{first_week_number + offset:02d}"
+                week_number = first_week_number + offset
+                if week_number > 0:
+                    label = f"S{week_number:02d}"
             if label is None:
                 label = f"{week_start:%d-%b} al {period_end:%d-%b}"
             period_labels.append(label)
