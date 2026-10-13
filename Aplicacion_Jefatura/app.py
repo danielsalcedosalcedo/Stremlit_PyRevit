@@ -870,31 +870,6 @@ def render_dashboard(
             if planned_curve.empty:
                 st.info("No hay una curva programada disponible para la unidad seleccionada.")
             else:
-                visible_period = None
-                if len(planned_curve) > 1:
-                    period_indices = list(range(len(planned_curve)))
-                    if frequency == "W":
-                        period_values = planned_curve["semana_label"].astype(str).tolist()
-                        format_period = lambda index: period_values[index]
-                    else:
-                        period_values = (
-                            pd.to_datetime(planned_curve["fecha"], errors="coerce")
-                            .dt.normalize()
-                            .tolist()
-                        )
-                        format_period = lambda index: period_values[index].strftime("%d-%m-%Y")
-                    selected_indices = st.select_slider(
-                        "Tramo visible del gráfico",
-                        options=period_indices,
-                        value=(period_indices[0], period_indices[-1]),
-                        format_func=format_period,
-                        key=f"{dashboard_key}_period_range_{frequency}",
-                        help="Arrastra los extremos para acercar el gráfico a un período.",
-                    )
-                    visible_period = (
-                        period_values[selected_indices[0]],
-                        period_values[selected_indices[1]],
-                    )
                 if frequency == "W":
                     chart = grafico_curva_s_semanal_plotly(
                         planned_curve,
@@ -904,7 +879,6 @@ def render_dashboard(
                             else "Curva S · Programado vs. real"
                         ),
                         df_real_pyrevit=real_curve,
-                        visible_period=visible_period,
                     )
                 else:
                     chart = grafico_curva_s_diaria_plotly(
@@ -915,7 +889,6 @@ def render_dashboard(
                             else "Curva diaria · Programado vs. real"
                         ),
                         df_real_pyrevit=real_curve,
-                        visible_period=visible_period,
                     )
                 st.plotly_chart(
                     chart,
