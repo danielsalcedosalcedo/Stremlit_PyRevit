@@ -597,6 +597,72 @@ def _build_global_excel_export(reports: dict[str, pd.DataFrame]) -> bytes:
     return output.getvalue()
 
 
+def _calcular_kpis_curva_s(
+    planned_curve: pd.DataFrame,
+    real_curve: pd.DataFrame,
+    frequency: str,
+    cutoff: date,
+) -> dict[str, float | None]:
+    """Calcula el porcentaje de avance programado, real y desviación/atraso a la fecha de corte."""
+    pct_prog = None
+    pct_real = None
+
+    if not planned_curve.empty and "acumulado" in planned_curve.columns:
+        if frequency == "W":
+            from logic.charts import _current_week_label
+            curr_lbl = _current_week_label(planned_curve, cutoff)
+            if curr_lbl is not None and "semana_label" in planned_curve.columns:
+                match = planned_curve[planned_curve["semana_label"].astype(str) == str(curr_lbl)]
+                if not match.empty:
+                    pct_prog = float(match.iloc[-1]["acumulado"])
+            if pct_prog is None:
+                pct_prog = float(planned_curve.iloc[-1]["acumulado"])
+        else:
+            fechas = pd.to_datetime(planned_curve.get("fecha", []), errors="coerce")
+            cutoff_ts = pd.Timestamp(cutoff)
+            valid = planned_curve[fechas <= cutoff_ts]
+            if not valid.empty:
+                pct_prog = float(valid.iloc[-1]["acumulado"])
+            elif not planned_curve.empty:
+                pct_prog = float(planned_curve.iloc[-1]["acumulado"])
+
+    if not real_curve.empty and "pct_ejecutado_acum" in real_curve.columns:
+        if "fecha" in real_curve.columns:
+            fechas_r = pd.to_datetime(real_curve["fecha"], errors="coerce", dayfirst=True)
+            cutoff_ts = pd.Timestamp(cutoff)
+            valid_r = real_curve[fechas_r <= cutoff_ts]
+            if not valid_r.empty:
+                pct_real = float(valid_r.iloc[-1]["pct_ejecutado_acum"])
+            else:
+                pct_real = float(real_curve.iloc[-1]["pct_ejecutado_acum"])
+        else:
+            pct_real = float(real_curve.iloc[-1]["pct_ejecutado_acum"])
+
+    desviacion = (pct_real - pct_prog) if (pct_prog is not None and pct_real is not None) else None
+    return {
+        "pct_prog": pct_prog,
+        "pct_real": pct_real,
+        "desviacion": desviacion,
+    }
+
+
+def _render_kpi_cards(cards: list[dict[str, str]]) -> None:
+    """Renderiza tarjetas métricas ejecutivas limpias con color condicional y sin redundancia."""
+    cards_html = []
+    for card in cards:
+        label = card.get("label", "")
+        value = card.get("value", "")
+        color = card.get("color", "#0A2A62")
+        cards_html.append(
+            f'<div style="flex:1 1 0;min-width:200px;border:1px solid #E6E9EE;border-radius:4px;padding:14px 16px;background:#fff;box-sizing:border-box;box-shadow:0 1px 2px rgba(0,0,0,0.03);">'
+            f'<div style="color:#6B7280;font-size:0.72rem;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;">{label}</div>'
+            f'<div style="color:{color};font-size:1.75rem;font-weight:700;margin-top:6px;line-height:1.2;">{value}</div>'
+            f'</div>'
+        )
+    html_code = f'<div style="display:flex;gap:14px;margin:8px 0 16px;flex-wrap:wrap;">{"".join(cards_html)}</div>'
+    st.html(html_code)
+
+
 def render_dashboard(
     excel_candidates: tuple[Path, ...],
     pyrevit_candidates: tuple[Path, ...],
@@ -611,18 +677,43 @@ def render_dashboard(
         if ifc_directory and ifc_directory.is_dir()
         else ()
     )
-    selected_ifc = None
+    selected_ifc_files: list[Path] = []
     if ifc_directory:
         if not ifc_files:
             st.error(f"No se encontraron modelos IFC en {ifc_directory}.")
             return
-        selected_ifc = st.selectbox(
-            "Modelo IFC",
-            options=ifc_files,
-            index=ifc_files.index(min(ifc_files, key=lambda path: path.stat().st_size)),
-            format_func=lambda path: path.name,
-            key=f"{dashboard_key}_ifc_model",
-        )
+
+        session_key = f"{dashboard_key}_ifc_models"
+        if session_key not in st.session_state:
+            # Selecciona el modelo más liviano por defecto para agilizar la carga inicial
+            st.session_state[session_key] = [
+                min(ifc_files, key=lambda path: path.stat().st_size)
+            ]
+
+        col_multiselect, col_btn1, col_btn2 = st.columns([6, 1.5, 1.5])
+        with col_btn1:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("Marcar todos", key=f"{dashboard_key}_btn_all", use_container_width=True):
+                st.session_state[session_key] = list(ifc_files)
+                st.rerun()
+        with col_btn2:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("Limpiar", key=f"{dashboard_key}_btn_clear", use_container_width=True):
+                st.session_state[session_key] = []
+                st.rerun()
+
+        with col_multiselect:
+            selected_ifc_files = st.multiselect(
+                "Modelos IFC (puedes seleccionar uno o varios)",
+                options=ifc_files,
+                format_func=lambda path: path.name,
+                key=session_key,
+                help="Elige uno o más archivos IFC para consolidar avance y visualización 3D.",
+            )
+
+        if not selected_ifc_files:
+            st.info("Selecciona al menos un archivo IFC para visualizar y analizar los datos de esta pestaña.")
+            return
 
     pyrevit_files = tuple(
         path for path in pyrevit_candidates if path.is_file() and path.stat().st_size > 0
@@ -634,28 +725,38 @@ def render_dashboard(
         tuple(path.stat().st_mtime for path in pyrevit_files),
         require_pyrevit=ifc_directory is None,
     )
-    try:
-        ifc_model = (
-            _load_ifc_data(
-                str(selected_ifc), selected_ifc.stat().st_mtime, include_geometry=False
-            )
-            if selected_ifc
-            else None
-        )
-    except Exception as exc:
-        st.error(f"No fue posible leer el modelo IFC {selected_ifc.name}: {exc}")
-        return
+    loaded_ifc_models: list[tuple[Path, dict]] = []
+    if selected_ifc_files:
+        for ifc_file in selected_ifc_files:
+            try:
+                model_data = _load_ifc_data(
+                    str(ifc_file),
+                    ifc_file.stat().st_mtime,
+                    include_geometry=False,
+                )
+                loaded_ifc_models.append((ifc_file, model_data))
+            except Exception as exc:
+                st.warning(f"No fue posible leer el modelo IFC {ifc_file.name}: {exc}")
+
+    all_records = []
+    for ifc_file, model_data in loaded_ifc_models:
+        for rec in model_data.get("records", []):
+            if "archivo_ifc" not in rec:
+                rec["archivo_ifc"] = ifc_file.name
+            all_records.append(rec)
+
     ifc_records = (
         pd.DataFrame(
-            ifc_model["records"],
+            all_records,
             columns=[
                 "ifc_id", "global_id", "assembly_code", "assembly_description",
                 "nombre", "kg", "cantidad_total", "unidad", "ejecutado",
                 "ei_zona", "ei_subcontratista", "ei_semana",
                 "ei_planificacion_obra", "ei_fecha_ejecucion", "fecha",
+                "archivo_ifc",
             ],
         )
-        if ifc_model is not None
+        if all_records
         else pd.DataFrame()
     )
     for error in loaded["errores"]:
@@ -672,7 +773,7 @@ def render_dashboard(
         st.info("El Excel asignado a esta pestaña no contiene códigos ITEM para vincular con BIM.")
         return
 
-    raw_pyrevit = ifc_records if ifc_model is not None else loaded["df_pyrevit"]
+    raw_pyrevit = ifc_records if ifc_directory is not None else loaded["df_pyrevit"]
     if (raw_pyrevit is None or raw_pyrevit.empty) and ifc_directory is None:
         st.error("No hay datos BIM para mostrar. La aplicación no tiene carga manual: verifica la exportación automática en la carpeta data.")
         st.markdown(
@@ -705,7 +806,7 @@ def render_dashboard(
             key=f"{dashboard_key}_contractor",
         )
 
-    if ifc_model is None:
+    if not loaded_ifc_models and ifc_directory is None:
         raw_pyrevit = raw_pyrevit[
             raw_pyrevit["assembly_code"].astype(str).str.strip().isin(excel_codes)
         ].copy()
@@ -715,12 +816,12 @@ def render_dashboard(
         ].copy()
     else:
         raw_pyrevit = raw_pyrevit.iloc[0:0].copy()
-    if raw_pyrevit.empty and ifc_model is None:
+    if raw_pyrevit.empty and not loaded_ifc_models and ifc_directory is None:
         st.info("La exportación BIM de esta pestaña no tiene códigos presentes en su Excel.")
         return
-    if raw_pyrevit.empty and ifc_model is not None:
+    if raw_pyrevit.empty and loaded_ifc_models:
         st.info(
-            "Los IFC aún no contienen Códigos de montaje vinculados al Excel. "
+            "Los IFC seleccionados aún no contienen Códigos de montaje vinculados al Excel. "
             "El visor se puede usar; agrega los parámetros BIM para habilitar los filtros y avances."
         )
 
@@ -738,7 +839,7 @@ def render_dashboard(
     st.markdown('<div class="section-title">Análisis ejecutivo</div>', unsafe_allow_html=True)
     dashboard_tabs = st.tabs(
         ["Curva de avance", "Partidas / códigos"]
-        + (["Modelo IFC"] if ifc_model is not None else [])
+        + (["Modelos IFC" if len(loaded_ifc_models) > 1 else "Modelo IFC"] if loaded_ifc_models else [])
     )
     tab_curve, tab_items = dashboard_tabs[:2]
 
@@ -870,31 +971,87 @@ def render_dashboard(
             if planned_curve.empty:
                 st.info("No hay una curva programada disponible para la unidad seleccionada.")
             else:
-                if frequency == "W":
-                    chart = grafico_curva_s_semanal_plotly(
-                        planned_curve,
-                        titulo=(
-                            f"Curva S · {unit_labels[selected_unit]} · Programado vs. real"
-                            if chosen_activity is None and selected_unit
-                            else "Curva S · Programado vs. real"
-                        ),
-                        df_real_pyrevit=real_curve,
+                titulo_curva = (
+                    f"Curva S · {unit_labels[selected_unit]} · Programado vs. real"
+                    if chosen_activity is None and selected_unit
+                    else "Curva S · Programado vs. real"
+                    if frequency == "W"
+                    else (
+                        f"Curva diaria · {unit_labels[selected_unit]} · Programado vs. real"
+                        if chosen_activity is None and selected_unit
+                        else "Curva diaria · Programado vs. real"
                     )
-                else:
-                    chart = grafico_curva_s_diaria_plotly(
-                        planned_curve,
-                        titulo=(
-                            f"Curva diaria · {unit_labels[selected_unit]} · Programado vs. real"
-                            if chosen_activity is None and selected_unit
-                            else "Curva diaria · Programado vs. real"
-                        ),
-                        df_real_pyrevit=real_curve,
-                    )
-                st.plotly_chart(
-                    chart,
-                    use_container_width=True,
-                    key=f"{dashboard_key}_planned_curve_{frequency}",
                 )
+
+                # Indicador de % de atraso / adelanto a la fecha (sin valores redundantes y con color condicional)
+                kpis = _calcular_kpis_curva_s(planned_curve, real_curve, frequency, cutoff)
+                if kpis["pct_prog"] is not None or kpis["pct_real"] is not None:
+                    prog_txt = f"{kpis['pct_prog']:.1f}%" if kpis["pct_prog"] is not None else "N/D"
+                    real_txt = f"{kpis['pct_real']:.1f}%" if kpis["pct_real"] is not None else "0.0%"
+
+                    if kpis["desviacion"] is not None:
+                        desv = kpis["desviacion"]
+                        if desv < -0.05:
+                            estado_txt = f"Atraso de {abs(desv):.1f}%"
+                            estado_color = "#C0392B"  # Rojo para atraso
+                        elif desv > 0.05:
+                            estado_txt = f"Adelanto de {desv:.1f}%"
+                            estado_color = "#2E9E6B"  # Verde para adelanto
+                        else:
+                            estado_txt = "En plazo (0.0%)"
+                            estado_color = "#0077B6"  # Azul para en plazo
+                    else:
+                        estado_txt = "Sin datos reales"
+                        estado_color = "#6B7280"
+
+                    _render_kpi_cards([
+                        {"label": "Programado a la fecha", "value": prog_txt, "color": "#0A2A62"},
+                        {"label": "Real ejecutado a la fecha", "value": real_txt, "color": "#0A2A62"},
+                        {"label": "Estado / Atraso a la fecha", "value": estado_txt, "color": estado_color},
+                    ])
+
+                # Selector de motor de renderizado de la curva S
+                col_chart_header, col_chart_ctrl = st.columns([7, 3])
+                with col_chart_ctrl:
+                    chart_engine = st.radio(
+                        "Motor de gráfico",
+                        ["Animado (JavaScript)", "Plotly"],
+                        horizontal=True,
+                        key=f"{dashboard_key}_engine_{frequency}",
+                        help="Elige entre la vista animada de alto rendimiento con Apache ECharts o el visor clásico Plotly.",
+                    )
+
+                if chart_engine == "Animado (JavaScript)":
+                    from logic.echarts_builder import build_curva_s_echarts_html
+                    import streamlit.components.v1 as components
+
+                    echarts_html = build_curva_s_echarts_html(
+                        planned_curve,
+                        real_curve,
+                        frequency=frequency,
+                        titulo=titulo_curva,
+                        cutoff_date=cutoff,
+                    )
+                    components.html(echarts_html, height=500)
+                else:
+                    if frequency == "W":
+                        chart = grafico_curva_s_semanal_plotly(
+                            planned_curve,
+                            titulo=titulo_curva,
+                            df_real_pyrevit=real_curve,
+                        )
+                    else:
+                        chart = grafico_curva_s_diaria_plotly(
+                            planned_curve,
+                            titulo=titulo_curva,
+                            df_real_pyrevit=real_curve,
+                        )
+                    st.plotly_chart(
+                        chart,
+                        use_container_width=True,
+                        key=f"{dashboard_key}_planned_curve_{frequency}",
+                    )
+
             st.caption("La curva programada se obtiene del Excel fijo del proyecto; la real, de la exportación PyRevit.")
             scheduled_activities = {}
             if loaded["avance_diario"]:
@@ -954,6 +1111,46 @@ def render_dashboard(
                     unidad=comparison_unit,
                 )
                 st.markdown("#### Avance por período · Cantidad programada vs. real")
+
+                # Métricas ejecutivas por cantidad (Programada, Real ejecutada y Estado/Atraso)
+                unit_sym = unit_labels.get(comparison_unit, comparison_unit or "")
+                if chosen_activity and chosen_activity["code"]:
+                    code_str = str(chosen_activity["code"]).strip()
+                    sub_model = model_item_summary.loc[model_item_summary["assembly_code"] == code_str]
+                    sub_item = item_summary.loc[item_summary["assembly_code"] == code_str]
+                else:
+                    sub_model = model_item_summary.loc[model_item_summary["Unidad"] == comparison_unit]
+                    sub_item = item_summary.loc[item_summary["Unidad"] == comparison_unit]
+
+                total_cant = float(sub_model["Cantidad total"].sum()) if not sub_model.empty else 0.0
+                real_cant = float(sub_item["Cantidad ejecutada"].sum()) if not sub_item.empty else 0.0
+                prog_pct = kpis.get("pct_prog") if kpis else None
+                prog_cant = total_cant * (prog_pct / 100.0) if (prog_pct is not None and total_cant > 0) else 0.0
+                desv_cant = real_cant - prog_cant
+
+                prog_cant_txt = f"{prog_cant:,.2f} {unit_sym}"
+                real_cant_txt = f"{real_cant:,.2f} {unit_sym}"
+
+                if prog_pct is not None and total_cant > 0:
+                    if desv_cant < -0.01:
+                        estado_cant_txt = f"Atraso de {abs(desv_cant):,.2f} {unit_sym}"
+                        estado_cant_color = "#C0392B"  # Rojo para atraso
+                    elif desv_cant > 0.01:
+                        estado_cant_txt = f"Adelanto de {desv_cant:,.2f} {unit_sym}"
+                        estado_cant_color = "#2E9E6B"  # Verde para adelanto
+                    else:
+                        estado_cant_txt = f"En plazo (0.00 {unit_sym})"
+                        estado_cant_color = "#0077B6"  # Azul para en plazo
+                else:
+                    estado_cant_txt = f"{real_cant:,.2f} {unit_sym}"
+                    estado_cant_color = "#0A2A62"
+
+                _render_kpi_cards([
+                    {"label": "Programado a la fecha", "value": prog_cant_txt, "color": "#0A2A62"},
+                    {"label": "Real ejecutado a la fecha", "value": real_cant_txt, "color": "#0A2A62"},
+                    {"label": "Estado / Atraso a la fecha", "value": estado_cant_txt, "color": estado_cant_color},
+                ])
+
                 if quantity_comparison.empty:
                     st.info("No hay cantidades comparables para el período y la unidad seleccionados.")
                 else:
@@ -1124,7 +1321,7 @@ def render_dashboard(
                 key=f"{dashboard_key}_item_progress",
             )
 
-    if ifc_model is not None:
+    if loaded_ifc_models:
         with dashboard_tabs[2]:
             viewer_scope = ifc_records.copy()
             if selected_zone != "Todas" and "ei_zona" in viewer_scope.columns:
@@ -1150,6 +1347,22 @@ def render_dashboard(
             st.caption(
                 "El visor respeta los filtros de zona y subcontratista seleccionados arriba."
             )
+            if len(loaded_ifc_models) > 1:
+                module_options = [path.name for path, _ in loaded_ifc_models]
+                selected_3d_modules = st.multiselect(
+                    "Modelos activos en la vista 3D",
+                    options=module_options,
+                    default=module_options,
+                    help="Permite prender o apagar modelos individuales en el visor 3D.",
+                    key=f"{dashboard_key}_ifc_3d_modules",
+                )
+                if selected_3d_modules:
+                    viewer_scope = viewer_scope[
+                        viewer_scope["archivo_ifc"].isin(selected_3d_modules)
+                    ]
+                else:
+                    st.info("Selecciona al menos un modelo para visualizar en 3D.")
+
             available_codes = sorted(
                 code for code in viewer_scope["assembly_code"].dropna()
                 .astype(str).str.strip().unique()
@@ -1166,10 +1379,6 @@ def render_dashboard(
                 viewer_scope = viewer_scope[
                     viewer_scope["assembly_code"].astype(str).str.strip().isin(visible_codes)
                 ]
-            visible_ids = set(
-                pd.to_numeric(viewer_scope["ifc_id"], errors="coerce")
-                .dropna().astype(int)
-            )
 
             executed_count = int(viewer_scope["ejecutado"].fillna(False).astype(bool).sum())
             total_weight = pd.to_numeric(
@@ -1187,7 +1396,7 @@ def render_dashboard(
                 )
             if not available_codes:
                 st.info(
-                    "Este IFC aún no tiene el parámetro Código de montaje. "
+                    "Los modelos IFC seleccionados aún no tienen el parámetro Código de montaje. "
                     "Los elementos se visualizarán en gris hasta agregar los parámetros de avance."
                 )
             st.caption(
@@ -1200,36 +1409,56 @@ def render_dashboard(
                 key=f"{dashboard_key}_load_ifc_geometry",
             ):
                 try:
-                    with st.spinner("Procesando geometría IFC..."):
-                        model_with_geometry = _load_ifc_data(
-                            str(selected_ifc),
-                            selected_ifc.stat().st_mtime,
-                            include_geometry=True,
-                            visible_ids=tuple(sorted(visible_ids)),
-                        )
+                    models_with_geometry = []
+                    total_missing_geometry = 0
+                    active_files = [
+                        path for path, _ in loaded_ifc_models
+                        if not viewer_scope.empty and (viewer_scope["archivo_ifc"] == path.name).any()
+                    ]
+                    with st.spinner(f"Procesando geometría 3D de {len(active_files)} modelo(s) IFC..."):
+                        for ifc_file in active_files:
+                            file_scope = viewer_scope[viewer_scope["archivo_ifc"] == ifc_file.name]
+                            file_visible_ids = set(
+                                pd.to_numeric(file_scope["ifc_id"], errors="coerce")
+                                .dropna().astype(int)
+                            )
+                            if not file_visible_ids:
+                                continue
+                            model_with_geom = _load_ifc_data(
+                                str(ifc_file),
+                                ifc_file.stat().st_mtime,
+                                include_geometry=True,
+                                visible_ids=tuple(sorted(file_visible_ids)),
+                            )
+                            models_with_geometry.append((model_with_geom, file_visible_ids))
+                            if model_with_geom.get("elements_without_geometry"):
+                                total_missing_geometry += model_with_geom["elements_without_geometry"]
+
                     from logic.ifc_viewer import build_ifc_figure
 
-                    figure = build_ifc_figure(model_with_geometry, visible_ids)
-                    if figure.data:
-                        st.plotly_chart(
-                            figure,
-                            use_container_width=True,
-                            key=f"{dashboard_key}_ifc_viewer",
-                        )
+                    if models_with_geometry:
+                        figure = build_ifc_figure(models_with_geometry)
+                        if figure.data:
+                            st.plotly_chart(
+                                figure,
+                                use_container_width=True,
+                                key=f"{dashboard_key}_ifc_viewer",
+                            )
+                        else:
+                            st.info(
+                                "No hay geometría visible para la combinación actual de filtros."
+                            )
+                        if total_missing_geometry:
+                            st.warning(
+                                f"{total_missing_geometry} elementos IFC no tienen geometría renderizable."
+                            )
                     else:
-                        st.info(
-                            "No hay geometría visible para la combinación actual de filtros."
-                        )
-                    if model_with_geometry["elements_without_geometry"]:
-                        st.warning(
-                            f"{model_with_geometry['elements_without_geometry']} "
-                            "elementos IFC no tienen geometría renderizable."
-                        )
+                        st.info("No hay elementos visibles para cargar geometría.")
                 except Exception as exc:
-                    st.error(f"No fue posible visualizar el modelo IFC: {exc}")
+                    st.error(f"No fue posible visualizar los modelos IFC: {exc}")
             else:
                 st.info(
-                    "Activa la casilla para procesar y mostrar la geometría 3D del modelo seleccionado."
+                    "Activa la casilla para procesar y mostrar la geometría 3D de los modelos seleccionados."
                 )
 
 st.markdown(
