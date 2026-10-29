@@ -106,6 +106,7 @@ def load_ifc_model(
             "ei_planificacion_obra": _as_text(planning_status),
             "ei_fecha_ejecucion": _as_text(execution_date),
             "fecha": _as_text(execution_date),
+            "archivo_ifc": Path(file_path).name,
         })
 
     geometries = {}
@@ -144,39 +145,55 @@ def load_ifc_model(
     }
 
 
-def build_ifc_figure(model_data: dict, visible_ids: set[int]):
-    """Construye una vista 3D interactiva con colores por estado de ejecución."""
+def build_ifc_figure(
+    model_data: dict | list[tuple[dict, set[int]]],
+    visible_ids: set[int] | None = None,
+):
+    """Construye una vista 3D interactiva con colores por estado de ejecución.
+
+    Soporta un único modelo (dict y visible_ids) o una lista de tuplas
+    [(model_data_1, visible_ids_1), ...] para combinar múltiples archivos IFC.
+    """
     import plotly.graph_objects as go
 
-    records_by_id = {
-        record["ifc_id"]: record for record in model_data["records"]
-    }
+    if isinstance(model_data, list):
+        items = model_data
+    else:
+        items = [(model_data, visible_ids or set())]
+
     vertices_by_status = {True: [], False: []}
     faces_by_status = {True: [], False: []}
     hover_by_status = {True: [], False: []}
 
-    for express_id in visible_ids:
-        geometry = model_data["geometries"].get(express_id)
-        record = records_by_id.get(express_id)
-        if not geometry or not record:
-            continue
+    for single_model, current_visible_ids in items:
+        records_by_id = {
+            record["ifc_id"]: record for record in single_model["records"]
+        }
+        for express_id in current_visible_ids:
+            geometry = single_model["geometries"].get(express_id)
+            record = records_by_id.get(express_id)
+            if not geometry or not record:
+                continue
 
-        status = record["ejecutado"]
-        offset = len(vertices_by_status[status]) // 3
-        vertices_by_status[status].extend(geometry["vertices"])
-        faces_by_status[status].extend(
-            tuple(index + offset for index in geometry["faces"][index:index + 3])
-            for index in range(0, len(geometry["faces"]), 3)
-        )
-        hover_text = (
-            f"{record['assembly_code'] or 'Sin código'} · "
-            f"{record['assembly_description'] or record['nombre']}<br>"
-            f"Peso: {record['kg'] or 0.0:,.2f} Kg<br>"
-            f"Estado: {'Ejecutado' if status else 'Pendiente'}"
-        )
-        hover_by_status[status].extend(
-            [hover_text] * (len(geometry["vertices"]) // 3)
-        )
+            status = record["ejecutado"]
+            offset = len(vertices_by_status[status]) // 3
+            vertices_by_status[status].extend(geometry["vertices"])
+            faces_by_status[status].extend(
+                tuple(index + offset for index in geometry["faces"][index:index + 3])
+                for index in range(0, len(geometry["faces"]), 3)
+            )
+            file_name = record.get("archivo_ifc")
+            file_prefix = f"<b>{file_name}</b><br>" if file_name else ""
+            hover_text = (
+                f"{file_prefix}"
+                f"{record['assembly_code'] or 'Sin código'} · "
+                f"{record['assembly_description'] or record['nombre']}<br>"
+                f"Peso: {record['kg'] or 0.0:,.2f} Kg<br>"
+                f"Estado: {'Ejecutado' if status else 'Pendiente'}"
+            )
+            hover_by_status[status].extend(
+                [hover_text] * (len(geometry["vertices"]) // 3)
+            )
 
     figure = go.Figure()
     for status, label, color in (
