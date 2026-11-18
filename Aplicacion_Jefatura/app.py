@@ -22,6 +22,12 @@ from logic.charts import (  # noqa: E402
     grafico_curva_s_diaria_plotly,
     grafico_curva_s_semanal_plotly,
 )
+from logic.curva_lb import (  # noqa: E402
+    construir_base_curva,
+    grafico_curva_lb_plotly,
+    grafico_spi_curva_lb_plotly,
+    tabla_curva_lb,
+)
 from logic.loader import (  # noqa: E402
     load_avance_diario,
     load_avance_semanal,
@@ -1015,10 +1021,11 @@ def render_dashboard(
                 with col_chart_ctrl:
                     chart_engine = st.radio(
                         "Motor de gráfico",
-                        ["Animado (JavaScript)", "Plotly"],
+                        ["Animado (JavaScript)", "Plotly", "Corte y desfase"],
                         horizontal=True,
                         key=f"{dashboard_key}_engine_{frequency}",
-                        help="Elige entre la vista animada de alto rendimiento con Apache ECharts o el visor clásico Plotly.",
+                        help="Animado: Apache ECharts. Plotly: visor clásico. "
+                             "Corte y desfase: curva con línea de corte, desfase, barras de avance por semana y SPI.",
                     )
 
                 if chart_engine == "Animado (JavaScript)":
@@ -1033,6 +1040,60 @@ def render_dashboard(
                         cutoff_date=cutoff,
                     )
                     components.html(echarts_html, height=500)
+                elif chart_engine == "Corte y desfase":
+                    # Real diario (misma partida/unidad/corte que real_curve) para leer el EV a cualquier fecha
+                    real_daily = pd.DataFrame()
+                    if chosen_activity is not None or selected_unit:
+                        try:
+                            real_daily = calcular_curva_s_real_pyrevit(
+                                curve_scope,
+                                frecuencia="D",
+                                fecha_corte=pd.Timestamp(cutoff),
+                                unidad=curve_unit,
+                            )
+                        except Exception as exc:
+                            st.warning(f"No fue posible calcular la curva real diaria: {exc}")
+                    ref_dates = (loaded["avance_diario"] or {}).get("fechas") or []
+                    lb_base = construir_base_curva(
+                        planned_curve if frequency == "W" else None,
+                        planned_curve if frequency == "D" else None,
+                        real_daily,
+                        pd.Timestamp(cutoff),
+                        fecha_referencia=min(ref_dates) if len(ref_dates) else None,
+                    )
+                    if lb_base is None:
+                        st.info("No hay datos programados suficientes para esta vista.")
+                    else:
+                        lb_mode = "sem" if frequency == "W" else "dia"
+                        lb_bars = (
+                            st.checkbox(
+                                "Barras de avance por semana",
+                                value=True,
+                                key=f"{dashboard_key}_lb_bars",
+                            )
+                            if frequency == "W"
+                            else False
+                        )
+                        st.plotly_chart(
+                            grafico_curva_lb_plotly(lb_base, modo=lb_mode, barras=lb_bars),
+                            use_container_width=True,
+                            key=f"{dashboard_key}_lb_chart_{frequency}",
+                        )
+                        if frequency == "W" and lb_base["tiene_real"]:
+                            fig_spi = grafico_spi_curva_lb_plotly(lb_base)
+                            if fig_spi is not None:
+                                with st.expander("SPI semanal y acumulado", expanded=False):
+                                    st.plotly_chart(
+                                        fig_spi,
+                                        use_container_width=True,
+                                        key=f"{dashboard_key}_lb_spi",
+                                    )
+                        with st.expander("Tabla de valores", expanded=False):
+                            st.dataframe(
+                                tabla_curva_lb(lb_base, lb_mode),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
                 else:
                     if frequency == "W":
                         chart = grafico_curva_s_semanal_plotly(
