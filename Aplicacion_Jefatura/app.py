@@ -25,7 +25,6 @@ from logic.charts import (  # noqa: E402
 from logic.curva_lb import (  # noqa: E402
     construir_base_curva,
     grafico_curva_lb_plotly,
-    grafico_spi_curva_lb_plotly,
     tabla_curva_lb,
 )
 from logic.loader import (  # noqa: E402
@@ -1016,6 +1015,8 @@ def render_dashboard(
                         {"label": "Estado / Atraso a la fecha", "value": estado_txt, "color": estado_color},
                     ])
 
+                lb_pending = None  # figura "Corte y desfase" pendiente de dibujar (ver más abajo)
+
                 # Selector de motor de renderizado de la curva S
                 col_chart_header, col_chart_ctrl = st.columns([7, 3])
                 with col_chart_ctrl:
@@ -1025,7 +1026,8 @@ def render_dashboard(
                         horizontal=True,
                         key=f"{dashboard_key}_engine_{frequency}",
                         help="Animado: Apache ECharts. Plotly: visor clásico. "
-                             "Corte y desfase: curva con línea de corte, desfase, barras de avance por semana y SPI.",
+                             "Corte y desfase: curva S (% programado y real) con línea de corte, desfase "
+                             "y barras con la cantidad programada y real por período.",
                     )
 
                 if chart_engine == "Animado (JavaScript)":
@@ -1070,36 +1072,13 @@ def render_dashboard(
                     if lb_base is None:
                         st.info("No hay datos programados suficientes para esta vista.")
                     else:
-                        lb_mode = "sem" if frequency == "W" else "dia"
-                        lb_bars = (
-                            st.checkbox(
-                                "Barras de avance por semana",
-                                value=True,
-                                key=f"{dashboard_key}_lb_bars",
-                            )
-                            if frequency == "W"
-                            else False
-                        )
-                        st.plotly_chart(
-                            grafico_curva_lb_plotly(lb_base, modo=lb_mode, barras=lb_bars),
-                            use_container_width=True,
-                            key=f"{dashboard_key}_lb_chart_{frequency}",
-                        )
-                        if frequency == "W" and lb_base["tiene_real"]:
-                            fig_spi = grafico_spi_curva_lb_plotly(lb_base)
-                            if fig_spi is not None:
-                                with st.expander("SPI semanal y acumulado", expanded=False):
-                                    st.plotly_chart(
-                                        fig_spi,
-                                        use_container_width=True,
-                                        key=f"{dashboard_key}_lb_spi",
-                                    )
-                        with st.expander("Tabla de valores", expanded=False):
-                            st.dataframe(
-                                tabla_curva_lb(lb_base, lb_mode),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
+                        # La figura combinada necesita el comparativo de cantidades, que se calcula
+                        # más abajo: se reserva aquí su lugar y se dibuja al tenerlo.
+                        lb_pending = {
+                            "base": lb_base,
+                            "mode": "sem" if frequency == "W" else "dia",
+                            "slot": st.container(),
+                        }
                 else:
                     if frequency == "W":
                         chart = grafico_curva_s_semanal_plotly(
@@ -1218,7 +1197,29 @@ def render_dashboard(
                     {"label": "Estado / Atraso a la fecha", "value": estado_cant_txt, "color": estado_cant_color},
                 ])
 
-                if quantity_comparison.empty:
+                if lb_pending is not None:
+                    # Figura combinada: curva S (%) + barras de cantidad por período, en el lugar reservado
+                    with lb_pending["slot"]:
+                        st.plotly_chart(
+                            grafico_curva_lb_plotly(
+                                lb_pending["base"],
+                                modo=lb_pending["mode"],
+                                df_cantidades=quantity_comparison,
+                            ),
+                            use_container_width=True,
+                            key=f"{dashboard_key}_lb_chart_{frequency}",
+                        )
+                        with st.expander("Tabla de valores (% acumulado)", expanded=False):
+                            st.dataframe(
+                                tabla_curva_lb(lb_pending["base"], lb_pending["mode"]),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                    if quantity_comparison.empty:
+                        st.info("No hay cantidades comparables para el período y la unidad seleccionados.")
+                    else:
+                        st.caption("Las barras de cantidad por período ya están incluidas en el gráfico de arriba.")
+                elif quantity_comparison.empty:
                     st.info("No hay cantidades comparables para el período y la unidad seleccionados.")
                 else:
                     st.plotly_chart(
