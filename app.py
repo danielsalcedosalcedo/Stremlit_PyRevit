@@ -40,12 +40,6 @@ from logic.charts import (
     grafico_avance_por_nivel_plotly,
     grafico_curva_real_pyrevit_plotly,
 )
-from logic.curva_lb import (
-    construir_base_curva,
-    grafico_curva_lb_plotly,
-    grafico_spi_curva_lb_plotly,
-    tabla_curva_lb,
-)
 
 # ═══════════════════════════════════════════════════════════════════════
 # FUNCIONES CACHEADAS PARA OPTIMIZAR STREAMLIT
@@ -386,14 +380,8 @@ def _init_state():
 
     # Auto-cargar datos por defecto si están disponibles en disco y la sesión está vacía
     if st.session_state.df_datos is None:
-        excel_path = next(
-            (p for p in [
-                os.path.join(os.path.dirname(__file__), "Demoliciones_Avance.xlsx"),
-                os.path.join(os.path.dirname(__file__), "data", "programado", "Demoliciones_Avance.xlsx"),
-            ] if os.path.exists(p)),
-            None,
-        )
-        if excel_path:
+        excel_path = os.path.join(os.path.dirname(__file__), "Demoliciones_Avance.xlsx")
+        if os.path.exists(excel_path):
             try:
                 with open(excel_path, "rb") as f:
                     raw = f.read()
@@ -955,76 +943,6 @@ else:
                 df_show_d["fecha"] = pd.to_datetime(df_show_d["fecha"]).dt.strftime("%d-%m-%Y")
                 df_show_d.columns = ["Fecha", "Parcial %", "Programado %"]
                 st.dataframe(df_show_d, use_container_width=True, hide_index=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# SECCIÓN 5 – AVANCE FÍSICO PROGRAMADO vs REAL (SEMANAL · DIARIO)
-# ═══════════════════════════════════════════════════════════════════════
-st.markdown('<div class="section-title">5. Avance físico acumulado: Programado vs Real (Semanal / Diario)</div>',
-            unsafe_allow_html=True)
-
-if st.session_state.avance_semanal is None and st.session_state.avance_diario is None:
-    st.info("👆 Carga el Excel (hojas Avance Semanal / Avance Diario) para ver esta curva.")
-else:
-    _corte_lb = pd.to_datetime(proyecto_fecha)
-
-    # Real (PyRevit + avances manuales), con el mismo filtro de partida de la sección 4
-    _df_real_lb = None
-    if df_pyr_filtrado is not None and not df_pyr_filtrado.empty:
-        try:
-            _df_real_lb = get_curva_s_real_pyrevit(df_pyr_filtrado, frecuencia="D", fecha_corte=_corte_lb)
-        except Exception:
-            _df_real_lb = None
-
-    _df_sem_lb = (get_curva_s_semanal(st.session_state.avance_semanal, actividad=actividad_filtro)
-                  if st.session_state.avance_semanal is not None else None)
-    _df_dia_lb = (get_curva_s_diaria(st.session_state.avance_diario, actividad=actividad_filtro)
-                  if st.session_state.avance_diario is not None else None)
-
-    _base_lb = construir_base_curva(_df_sem_lb, _df_dia_lb, _df_real_lb, _corte_lb)
-    if _base_lb is None:
-        st.warning("No hay datos programados suficientes para construir la curva.")
-    else:
-        _k = _base_lb["corte"]
-        st.caption(f"Partida: **{partida_sel}** · Corte: **{_corte_lb.strftime('%d-%m-%Y')}** "
-                   "(usa la partida elegida en la sección 4 y la fecha de corte de la barra lateral)")
-        if not _base_lb["tiene_real"]:
-            st.info("Sin avance real (PyRevit o manual) hasta la fecha de corte: solo se muestra el programado.")
-
-        _d_ref = _k.get("desfase_dia", _k.get("desfase_sem"))
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("% Programado al corte", f"{_k['prog']:.1f}%" if _k["prog"] is not None else "—")
-        c2.metric("% Real (BIM)", f"{_k['ev']:.1f}%" if _k["ev"] is not None else "Sin datos")
-        c3.metric("Desfase", f"{_d_ref:+.1f} pts" if _d_ref is not None else "—")
-        c4.metric("SPI (real / programado)", f"{_k['spi']:.2f}" if _k["spi"] is not None else "—")
-
-        _opciones_vista = []
-        if _base_lb["semanas"]:
-            _opciones_vista.append("📅 Semanal")
-        if _base_lb["diario"]:
-            _opciones_vista.append("📆 Diaria")
-        col_m, col_b = st.columns([2, 1])
-        with col_m:
-            _modo_lb = st.radio("Vista:", _opciones_vista, horizontal=True, key="radio_modo_lb")
-        _es_sem = "Semanal" in _modo_lb
-        with col_b:
-            _barras_lb = st.checkbox("Barras de avance por semana", value=True, key="chk_barras_lb",
-                                     disabled=not _es_sem)
-
-        st.plotly_chart(
-            grafico_curva_lb_plotly(_base_lb, modo="sem" if _es_sem else "dia", barras=_barras_lb),
-            use_container_width=True,
-        )
-
-        if _es_sem and _base_lb["tiene_real"]:
-            _fig_spi = grafico_spi_curva_lb_plotly(_base_lb)
-            if _fig_spi is not None:
-                with st.expander("📈 SPI semanal y acumulado", expanded=False):
-                    st.plotly_chart(_fig_spi, use_container_width=True)
-
-        with st.expander("📊 Tabla de valores", expanded=False):
-            st.dataframe(tabla_curva_lb(_base_lb, "sem" if _es_sem else "dia"),
-                         use_container_width=True, hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════
