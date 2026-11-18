@@ -1,8 +1,8 @@
 # logic/curva_lb.py
-# Curva de avance físico acumulado: PROGRAMADO (Excel) vs REAL (PyRevit)
-# con vista SEMANAL (S1..Sn) o DIARIA, línea de corte, desfase, barras de avance
-# por semana y SPI. Replica en Plotly la lógica del gráfico "Avance físico" del
-# tablero BIM 4D de referencia (LB / EV), adaptada a los datos de esta app:
+# Curva S de avance físico: % acumulado PROGRAMADO (Excel) vs % REAL (PyRevit),
+# con vista SEMANAL (S1..Sn) o DIARIA, línea de corte, desfase y barras con las
+# CANTIDADES por período (programada vs real, en m2/m3/ml...). Replica en Plotly la
+# lógica del gráfico "Avance físico" del tablero BIM 4D de referencia, adaptada a:
 #   - Programado  = hojas 'Avance Semanal' / 'Avance Diario' del Excel
 #   - Real (EV)   = elementos ejecutados de PyRevit (% acumulado por fecha)
 
@@ -130,11 +130,21 @@ def construir_base_curva(df_sem: pd.DataFrame | None, df_dia: pd.DataFrame | Non
             filas.append({
                 "n": int(n) if n else len(filas) + 1, "label": str(w["semana_label"]),
                 "ini": ini, "fin": fin, "prog": prog, "ev": ev, "pv": pv, "evS": evs,
-                "spi": (evs / pv) if (evs is not None and pv > 0.01) else None,
-                "spiA": (ev / prog) if (ev is not None and prog > 0.01) else None,
             })
             prev_p = prog
             prev_e = ev if ev is not None else prev_e
+        # Si hay avance real posterior al fin del programado, se prolongan las semanas
+        # (programado plano en su último valor) para que la curva real no se corte.
+        while tiene_real and filas and filas[-1]["fin"] is not None and filas[-1]["fin"] < ultimo_ev:
+            u = filas[-1]
+            ini_x = u["fin"] + pd.Timedelta(days=1)
+            fin_x = ini_x + pd.Timedelta(days=6)
+            ev_x = ev_a(min(fin_x, ultimo_ev))
+            filas.append({
+                "n": u["n"] + 1, "label": f"S{u['n'] + 1:02d}", "ini": ini_x, "fin": fin_x,
+                "prog": u["prog"], "ev": ev_x, "pv": 0.0, "evS": ev_x - prev_e,
+            })
+            prev_e = ev_x
         base["semanas"] = filas
 
         # semana del corte (la que contiene la fecha de corte; acotada al calendario)
@@ -159,10 +169,16 @@ def construir_base_curva(df_sem: pd.DataFrame | None, df_dia: pd.DataFrame | Non
         d["fecha"] = pd.to_datetime(d["fecha"]).dt.normalize()
         d = d.dropna(subset=["fecha"]).sort_values("fecha").reset_index(drop=True)
         fechas_d = list(d["fecha"])
+        prog_d = [float(v) for v in d["acumulado"]]
+        # Avance real posterior al fin del programado: se prolongan los días (programado plano)
+        if tiene_real and fechas_d and fechas_d[-1] < ultimo_ev:
+            extra = pd.date_range(fechas_d[-1] + pd.Timedelta(days=1), ultimo_ev, freq="D")
+            fechas_d += list(extra)
+            prog_d += [prog_d[-1]] * len(extra)
         ev_d = [ev_a(f) if (tiene_real and f <= ultimo_ev) else None for f in fechas_d]
         i_corte = max((i for i, f in enumerate(fechas_d) if f <= corte), default=0)
         i_ev = max((i for i, v in enumerate(ev_d) if v is not None), default=None)
-        base["diario"] = {"fechas": fechas_d, "prog": [float(v) for v in d["acumulado"]],
+        base["diario"] = {"fechas": fechas_d, "prog": prog_d,
                           "ev": ev_d, "i_corte": i_corte, "i_ev": i_ev}
         cabo["i_corte"], cabo["i_ev"] = i_corte, i_ev
         cabo["prog_dia"] = base["diario"]["prog"][i_corte]
@@ -175,100 +191,152 @@ def construir_base_curva(df_sem: pd.DataFrame | None, df_dia: pd.DataFrame | Non
     prog = cabo.get("prog_dia", cabo.get("prog_corte_sem"))
     ev = cabo.get("ev_dia", cabo.get("ev_sem"))
     cabo["prog"], cabo["ev"] = prog, ev
-    cabo["spi"] = (ev / prog) if (ev is not None and prog and prog > 0.01) else None
     base["corte"] = cabo
     return base
 
 
-# ── gráfico principal ─────────────────────────────────────────────────────
-def grafico_curva_lb_plotly(base: dict, modo: str = "sem", barras: bool = True,
+# ── gráfico principal: curva S (%) + barras de cantidad por período ───────
+def _barras_cantidad(df_cant: pd.DataFrame | None) -> list[dict]:
+    """Extrae del comparativo de cantidades una lista de {unidad, etiqueta, periodos, prog, real}."""
+    if df_cant is None or df_cant.empty:
+        return []
+    etiquetas = df_cant.attrs.get("unidades", {})
+    out = []
+    for col in df_cant.columns:
+        if not col.startswith("cantidad_programada_"):
+            continue
+        u = col.removeprefix("cantidad_programada_")
+        if f"cantidad_real_{u}" not in df_cant.columns:
+            continue
+        out.append({"unidad": u, "etiqueta": etiquetas.get(u, u),
+                    "periodos": list(df_cant["periodo"]),
+                    "prog": list(df_cant[col]), "real": list(df_cant[f"cantidad_real_{u}"])})
+    return out
+
+
+def grafico_curva_lb_plotly(base: dict, modo: str = "sem", df_cantidades: pd.DataFrame | None = None,
                             titulo: str | None = None) -> go.Figure:
-    """modo = 'sem' (semanal) | 'dia' (diario)."""
+    """
+    Curva S (% programado y % real) + barras con la cantidad por período.
+    modo = 'sem' (semanal) | 'dia' (diario)
+    df_cantidades = calcular_comparativo_cantidades_periodo(...): periodo, cantidad_programada_<u>, cantidad_real_<u>
+    """
     sem = modo == "sem"
     K = base["corte"]
+    barras = _barras_cantidad(df_cantidades)
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
+    # ── series de la curva, indexadas por clave de período ────────────────
     if sem:
         S = base["semanas"]
-        x = [w["label"] for w in S]
-        prog, ev = [w["prog"] for w in S], [w["ev"] for w in S]
-        hover = [
+        clave = lambda w: w["label"]
+        keys_curva = [w["label"] for w in S]
+        prog_m = {w["label"]: w["prog"] for w in S}
+        ev_m = {w["label"]: w["ev"] for w in S}
+        hov_m = {w["label"]: (
             f"<b>Semana {w['n']}</b> · {_fd(w['ini'])} → {_fd(w['fin'])}<br>"
             f"Programado: {_f2(w['prog'])} %<br>"
-            f"Real: {_f2(w['ev']) + ' %' if w['ev'] is not None else '—'}<br>"
-            + (f"Desfase: {w['ev'] - w['prog']:+.2f} pts<br>" if w["ev"] is not None else "")
-            + f"Semana · programado {_f2(w['pv'])} %"
-            + (f" · real {_f2(w['evS'])} %" if w["evS"] is not None else "")
-            + (f"<br>SPI semana {_f2(w['spi'])} · acumulado {_f2(w['spiA'])}" if w["spi"] is not None else "")
-            for w in S
-        ]
-        i_c, i_e = K["sem_idx"], K.get("sem_ev_idx")
-        x_c = x[i_c]
-        x_e = x[i_e] if i_e is not None else None
+            f"Real: {_f2(w['ev']) + ' %' if w['ev'] is not None else '—'}"
+            + (f"<br>Desfase: {w['ev'] - w['prog']:+.2f} pts" if w["ev"] is not None else "")
+        ) for w in S}
+        k_corte = S[K["sem_idx"]]["label"]
+        k_ev = S[K["sem_ev_idx"]]["label"] if K.get("sem_ev_idx") is not None else None
+        keys_barras = [str(p) for b in barras for p in b["periodos"]]
+        x = list(dict.fromkeys([str(p) for p in (barras[0]["periodos"] if barras else [])] + keys_curva))
+        if not barras:
+            x = keys_curva
     else:
         D = base["diario"]
-        x, prog, ev = D["fechas"], D["prog"], D["ev"]
-        hover = [
-            f"<b>{_fdl(f)}</b><br>Programado: {_f2(p)} %<br>"
-            f"Real: {_f2(e) + ' %' if e is not None else '— (sin ejecución registrada)'}"
-            + (f"<br>Desfase: {e - p:+.2f} pts" if e is not None else "")
-            for f, p, e in zip(x, prog, ev)
-        ]
-        i_c, i_e = K["i_corte"], K.get("i_ev")
-        x_c = x[i_c]
-        x_e = x[i_e] if i_e is not None else None
+        keys_curva = [pd.Timestamp(f) for f in D["fechas"]]
+        prog_m = dict(zip(keys_curva, D["prog"]))
+        ev_m = dict(zip(keys_curva, D["ev"]))
+        hov_m = {f: (
+            f"<b>{_fdl(f)}</b><br>Programado: {_f2(prog_m[f])} %<br>"
+            f"Real: {_f2(ev_m[f]) + ' %' if ev_m[f] is not None else '— (sin ejecución registrada)'}"
+            + (f"<br>Desfase: {ev_m[f] - prog_m[f]:+.2f} pts" if ev_m[f] is not None else "")
+        ) for f in keys_curva}
+        k_corte = keys_curva[K["i_corte"]]
+        k_ev = keys_curva[K["i_ev"]] if K.get("i_ev") is not None else None
+        fechas_barras = []
+        if barras:
+            fechas_barras = list(pd.to_datetime(barras[0]["periodos"], format="%d-%m-%Y", errors="coerce").normalize())
+        x = sorted({*keys_curva, *[f for f in fechas_barras if not pd.isna(f)]})
 
-    # Barras de avance de la semana (programado / real) en el tercio inferior
-    if sem and barras:
-        pv = [w["pv"] for w in S]
-        evs = [w["evS"] for w in S]
-        bmax = max(max(pv), max((v or 0) for v in evs)) * 1.15 or 1
-        fig.add_trace(go.Bar(x=x, y=pv, name="Programado de la semana", marker_color=C_PROG, opacity=.28,
-                             hoverinfo="skip", offsetgroup="a"), secondary_y=True)
-        fig.add_trace(go.Bar(x=x, y=evs, name="Real de la semana", marker_color=C_REAL, opacity=.42,
-                             hoverinfo="skip", offsetgroup="b"), secondary_y=True)
-        fig.update_yaxes(range=[0, bmax / 0.32], showgrid=False, showticklabels=False, secondary_y=True)
+    prog = [prog_m.get(k) for k in x]
+    ev = [ev_m.get(k) for k in x]
+    hover = [hov_m.get(k, "") for k in x]
+
+    # ── barras de cantidad (eje derecho, ocupan el tercio inferior) ───────
+    if barras:
+        bmax = 0.0
+        for b in barras:
+            if sem:
+                pm = {str(p): v for p, v in zip(b["periodos"], b["prog"])}
+                rm = {str(p): v for p, v in zip(b["periodos"], b["real"])}
+            else:
+                ks = pd.to_datetime(b["periodos"], format="%d-%m-%Y", errors="coerce").normalize()
+                pm, rm = dict(zip(ks, b["prog"])), dict(zip(ks, b["real"]))
+            yp, yr = [pm.get(k) for k in x], [rm.get(k) for k in x]
+            bmax = max(bmax, max([v or 0 for v in yp] + [v or 0 for v in yr] + [0]))
+            fig.add_trace(go.Bar(x=x, y=yp, name=f"Cantidad programada · {b['etiqueta']}", marker_color=C_PROG,
+                                 opacity=.35, offsetgroup=f"p{b['unidad']}",
+                                 hovertemplate=f"%{{x}}<br>Programado: %{{y:,.2f}} {b['etiqueta']}<extra></extra>"),
+                          secondary_y=True)
+            fig.add_trace(go.Bar(x=x, y=yr, name=f"Cantidad real · {b['etiqueta']}", marker_color=C_REAL,
+                                 opacity=.55, offsetgroup=f"r{b['unidad']}",
+                                 hovertemplate=f"%{{x}}<br>Real: %{{y:,.2f}} {b['etiqueta']}<extra></extra>"),
+                          secondary_y=True)
+        bmax = (bmax * 1.15) or 1.0
+        ticks = [round(bmax * i / 3, 2) for i in range(4)]
+        fig.update_yaxes(range=[0, bmax / 0.32], tickvals=ticks, ticktext=[f"{t:,.0f}" for t in ticks],
+                         showgrid=False, tickfont=dict(color=C["subtext"], size=10),
+                         title_text="Cantidad por período (" + ", ".join(b["etiqueta"] for b in barras) + ")",
+                         title_font=dict(color=C["subtext"], size=11), secondary_y=True)
     else:
         fig.update_yaxes(visible=False, secondary_y=True)
 
-    # Curvas
+    # ── curvas S ──────────────────────────────────────────────────────────
     if base["tiene_real"]:
-        fig.add_trace(go.Scatter(x=x, y=ev, name="Real (PyRevit)", mode="lines+markers" if sem else "lines",
+        fig.add_trace(go.Scatter(x=x, y=ev, name="Real (PyRevit) · % acumulado",
+                                 mode="lines+markers" if sem else "lines",
                                  line=dict(color=C_REAL, width=2.8 if sem else 2.4), marker=dict(size=5),
                                  fill="tozeroy", fillcolor="rgba(192,57,43,.06)", connectgaps=False,
-                                 text=hover, hoverinfo="text"))
-    fig.add_trace(go.Scatter(x=x, y=prog, name="Programado (Excel)", mode="lines+markers" if sem else "lines",
+                                 text=hover, hoverinfo="text"), secondary_y=False)
+    fig.add_trace(go.Scatter(x=x, y=prog, name="Programado (Excel) · % acumulado",
+                             mode="lines+markers" if sem else "lines",
                              line=dict(color=C_PROG, width=2.4 if sem else 2), marker=dict(size=5),
-                             text=hover, hoverinfo="text"))
+                             connectgaps=False, text=hover, hoverinfo="text"), secondary_y=False)
 
-    # Línea de corte
-    txt = (f"CORTE · {x_c} ({_fd(S[i_c]['ini'])} → {_fd(S[i_c]['fin'])})" if sem
-           else f"CORTE · {_fdl(x_c)}")
-    fig.add_shape(type="line", x0=x_c, x1=x_c, y0=0, y1=100, line=dict(color=C_CORTE, width=1.6, dash="dash"))
-    fig.add_annotation(x=x_c, y=100, text=f"<b>{txt}</b>", showarrow=False, xanchor="right",
+    # ── línea de corte ────────────────────────────────────────────────────
+    if sem:
+        w = S[K["sem_idx"]]
+        txt = f"CORTE · {k_corte} ({_fd(w['ini'])} → {_fd(w['fin'])})"
+    else:
+        txt = f"CORTE · {_fdl(k_corte)}"
+    fig.add_shape(type="line", x0=k_corte, x1=k_corte, y0=0, y1=100, line=dict(color=C_CORTE, width=1.6, dash="dash"))
+    fig.add_annotation(x=k_corte, y=100, text=f"<b>{txt}</b>", showarrow=False, xanchor="right",
                        yanchor="bottom", font=dict(color=C_CORTE, size=10), xshift=-6)
-
-    # Diario: marca "real registrado hasta"
-    if not sem and x_e is not None and x_e != x_c:
-        fig.add_shape(type="line", x0=x_e, x1=x_e, y0=0, y1=100, line=dict(color=C_REAL, width=1, dash="dot"))
-        fig.add_annotation(x=x_e, y=4, text=f"real hasta {_fd(x_e)}", showarrow=False, xanchor="right",
+    if not sem and k_ev is not None and k_ev != k_corte:
+        fig.add_shape(type="line", x0=k_ev, x1=k_ev, y0=0, y1=100, line=dict(color=C_REAL, width=1, dash="dot"))
+        fig.add_annotation(x=k_ev, y=4, text=f"real hasta {_fd(k_ev)}", showarrow=False, xanchor="right",
                            font=dict(color=C_REAL, size=9))
 
-    # Puntos y etiquetas en el corte
-    puntos = [(x_c, prog[i_c], C_PROG, "top right")]
-    if i_e is not None and ev[i_e] is not None:
-        puntos.append((x_e, ev[i_e], C_REAL, "bottom right"))
+    puntos = [(k_corte, prog_m.get(k_corte), C_PROG, "top right")]
+    if k_ev is not None and ev_m.get(k_ev) is not None:
+        puntos.append((k_ev, ev_m[k_ev], C_REAL, "bottom right"))
     for xx, v, col, pos in puntos:
+        if v is None:
+            continue
         fig.add_trace(go.Scatter(x=[xx], y=[v], mode="markers+text", text=[f"<b>{v:.1f}%</b>"],
                                  textposition=pos, textfont=dict(color=col, size=11),
                                  marker=dict(size=10, color=col, line=dict(color="white", width=1.6)),
-                                 showlegend=False, hoverinfo="skip"))
+                                 showlegend=False, hoverinfo="skip"), secondary_y=False)
 
-    # Caja de desfase
+    # ── caja de desfase ───────────────────────────────────────────────────
     d = K.get("desfase_sem") if sem else K.get("desfase_dia")
     if d is not None:
         dcol = C["alerta"] if d < 0 else "#2E9E6B"
-        ref = (f"S{K['semana_ev']}" if sem else _fd(K["ev_fecha"]))
+        ref = f"S{K['semana_ev']}" if sem else _fd(K["ev_fecha"])
         cuerpo = (f"Real {_f2(K['ev_sem'])} % − Programado {_f2(K['prog_sem'])} %" if sem
                   else f"Real {_f2(K['ev_dia'])} % − Programado {_f2(base['diario']['prog'][K['i_ev']])} %")
         fig.add_annotation(
@@ -277,45 +345,25 @@ def grafico_curva_lb_plotly(base: dict, modo: str = "sem", barras: bool = True,
             text=f"<b>Desfase {ref}: {d:+.2f} pts</b><br><span style='font-size:10px'>{cuerpo}</span>",
             font=dict(color=dcol, size=13))
 
-    _apply_plotly_layout(fig, titulo or f"Avance físico acumulado · {'Semanal' if sem else 'Diario'}")
-    fig.update_layout(height=470, barmode="group", bargap=.35, hovermode="closest",
-                      margin=dict(l=55, r=25, t=80, b=55))
+    _apply_plotly_layout(fig, titulo or
+                         f"Curva S (% acumulado) y cantidad por período · {'Semanal' if sem else 'Diario'}")
+    fig.update_layout(height=500, barmode="group", bargap=.35, hovermode="closest",
+                      margin=dict(l=55, r=60 if barras else 25, t=80, b=55))
     fig.update_yaxes(range=[0, 102], ticksuffix="%", dtick=20, secondary_y=False)
     if sem:
-        fig.update_xaxes(tickangle=0, categoryorder="array", categoryarray=x)
+        fig.update_xaxes(tickangle=-35 if len(x) > 14 else 0, type="category", categoryorder="array",
+                         categoryarray=x, tickfont=dict(size=9))
     else:
         fig.update_xaxes(type="date", tickformat="%d-%b")
     return fig
 
 
-# ── gráfico SPI semanal ───────────────────────────────────────────────────
-def grafico_spi_curva_lb_plotly(base: dict) -> go.Figure | None:
-    rows = [w for w in (base.get("semanas") or []) if w["spi"] is not None]
-    if not rows:
-        return None
-    x = [w["label"] for w in rows]
-    cols = [("#2E9E6B" if w["spi"] >= 1 else "#D4A017" if w["spi"] >= .7 else C["alerta"]) for w in rows]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=x, y=[min(w["spi"], 2) for w in rows], marker_color=cols, opacity=.6,
-                         text=[f"{w['spi']:.2f}" if w["spi"] <= 2 else f"▲{w['spi']:.1f}" for w in rows],
-                         textposition="outside", name="SPI de la semana", hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=x, y=[w["spiA"] for w in rows], mode="lines+markers", name="SPI acumulado",
-                             line=dict(color=C_PROG, width=2)))
-    fig.add_hline(y=1, line=dict(color=C["subtext"], width=1.2, dash="dash"),
-                  annotation_text="SPI = 1 (en plazo)", annotation_position="top right")
-    _apply_plotly_layout(fig, "SPI semanal (real / programado)")
-    fig.update_layout(height=300, hovermode="x unified", margin=dict(l=55, r=25, t=70, b=40))
-    fig.update_yaxes(range=[0, 2.2], dtick=.5)
-    return fig
-
-
 def tabla_curva_lb(base: dict, modo: str = "sem") -> pd.DataFrame:
+    """Valores de la curva S (% acumulado) por semana o por día."""
     if modo == "sem":
         return pd.DataFrame([{
             "Semana": w["label"], "Inicio": _fdl(w["ini"]), "Fin": _fdl(w["fin"]),
             "Programado %": round(w["prog"], 2), "Real %": None if w["ev"] is None else round(w["ev"], 2),
-            "Prog. semana %": round(w["pv"], 2), "Real semana %": None if w["evS"] is None else round(w["evS"], 2),
-            "SPI semana": None if w["spi"] is None else round(w["spi"], 2),
         } for w in base["semanas"]])
     D = base["diario"]
     return pd.DataFrame({"Fecha": [_fdl(f) for f in D["fechas"]],
