@@ -386,8 +386,14 @@ def _init_state():
 
     # Auto-cargar datos por defecto si están disponibles en disco y la sesión está vacía
     if st.session_state.df_datos is None:
-        excel_path = os.path.join(os.path.dirname(__file__), "Demoliciones_Avance.xlsx")
-        if os.path.exists(excel_path):
+        excel_path = next(
+            (p for p in [
+                os.path.join(os.path.dirname(__file__), "Demoliciones_Avance.xlsx"),
+                os.path.join(os.path.dirname(__file__), "data", "programado", "Demoliciones_Avance.xlsx"),
+            ] if os.path.exists(p)),
+            None,
+        )
+        if excel_path:
             try:
                 with open(excel_path, "rb") as f:
                     raw = f.read()
