@@ -1015,34 +1015,11 @@ def render_dashboard(
                         {"label": "Estado / Atraso a la fecha", "value": estado_txt, "color": estado_color},
                     ])
 
-                lb_pending = None  # figura "Corte y desfase" pendiente de dibujar (ver más abajo)
+                lb_pending = None  # figura "Avance-Curva S" pendiente de dibujar (ver más abajo)
+                # Lugar reservado para las tarjetas de cantidad (se llenan cuando se calcula el comparativo)
+                qty_cards_slot = st.container()
 
-                # Selector de motor de renderizado de la curva S
-                col_chart_header, col_chart_ctrl = st.columns([7, 3])
-                with col_chart_ctrl:
-                    chart_engine = st.radio(
-                        "Motor de gráfico",
-                        ["Animado (JavaScript)", "Plotly", "Corte y desfase"],
-                        horizontal=True,
-                        key=f"{dashboard_key}_engine_{frequency}",
-                        help="Animado: Apache ECharts. Plotly: visor clásico. "
-                             "Corte y desfase: curva S (% programado y real) con línea de corte, desfase "
-                             "y barras con la cantidad programada y real por período.",
-                    )
-
-                if chart_engine == "Animado (JavaScript)":
-                    from logic.echarts_builder import build_curva_s_echarts_html
-                    import streamlit.components.v1 as components
-
-                    echarts_html = build_curva_s_echarts_html(
-                        planned_curve,
-                        real_curve,
-                        frequency=frequency,
-                        titulo=titulo_curva,
-                        cutoff_date=cutoff,
-                    )
-                    components.html(echarts_html, height=500)
-                elif chart_engine == "Corte y desfase":
+                if True:  # único gráfico: Avance-Curva S
                     # Real diario (misma partida/unidad/corte que real_curve) para leer el EV a cualquier fecha
                     real_daily = pd.DataFrame()
                     if chosen_activity is not None or selected_unit:
@@ -1079,24 +1056,6 @@ def render_dashboard(
                             "mode": "sem" if frequency == "W" else "dia",
                             "slot": st.container(),
                         }
-                else:
-                    if frequency == "W":
-                        chart = grafico_curva_s_semanal_plotly(
-                            planned_curve,
-                            titulo=titulo_curva,
-                            df_real_pyrevit=real_curve,
-                        )
-                    else:
-                        chart = grafico_curva_s_diaria_plotly(
-                            planned_curve,
-                            titulo=titulo_curva,
-                            df_real_pyrevit=real_curve,
-                        )
-                    st.plotly_chart(
-                        chart,
-                        use_container_width=True,
-                        key=f"{dashboard_key}_planned_curve_{frequency}",
-                    )
 
             st.caption("La curva programada se obtiene del Excel fijo del proyecto; la real, de la exportación PyRevit.")
             scheduled_activities = {}
@@ -1156,8 +1115,6 @@ def render_dashboard(
                     actividad=chosen_activity["activity"] if chosen_activity else None,
                     unidad=comparison_unit,
                 )
-                st.markdown("#### Avance por período · Cantidad programada vs. real")
-
                 # Métricas ejecutivas por cantidad (Programada, Real ejecutada y Estado/Atraso)
                 unit_sym = unit_labels.get(comparison_unit, comparison_unit or "")
                 if chosen_activity and chosen_activity["code"]:
@@ -1191,15 +1148,17 @@ def render_dashboard(
                     estado_cant_txt = f"{real_cant:,.2f} {unit_sym}"
                     estado_cant_color = "#0A2A62"
 
-                _render_kpi_cards([
-                    {"label": "Programado a la fecha", "value": prog_cant_txt, "color": "#0A2A62"},
-                    {"label": "Real ejecutado a la fecha", "value": real_cant_txt, "color": "#0A2A62"},
-                    {"label": "Estado / Atraso a la fecha", "value": estado_cant_txt, "color": estado_cant_color},
-                ])
+                with qty_cards_slot:
+                    _render_kpi_cards([
+                        {"label": "Programado a la fecha", "value": prog_cant_txt, "color": "#0A2A62"},
+                        {"label": "Real ejecutado a la fecha", "value": real_cant_txt, "color": "#0A2A62"},
+                        {"label": "Estado / Atraso a la fecha", "value": estado_cant_txt, "color": estado_cant_color},
+                    ])
 
                 if lb_pending is not None:
                     # Figura combinada: curva S (%) + barras de cantidad por período, en el lugar reservado
                     with lb_pending["slot"]:
+                        st.markdown("#### Avance-Curva S")
                         lb_c1, lb_c2 = st.columns(2)
                         lb_show_bars = lb_c1.checkbox(
                             "Mostrar avance físico (barras de cantidad)",
