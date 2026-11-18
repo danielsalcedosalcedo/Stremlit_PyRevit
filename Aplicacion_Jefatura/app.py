@@ -1215,11 +1215,9 @@ def render_dashboard(
                                 use_container_width=True,
                                 hide_index=True,
                             )
-                    if quantity_comparison.empty:
-                        st.info("No hay cantidades comparables para el período y la unidad seleccionados.")
-                    else:
-                        st.caption("Las barras de cantidad por período ya están incluidas en el gráfico de arriba.")
-                elif quantity_comparison.empty:
+
+                # Gráfico de cantidades por período (siempre visible, también junto a la figura combinada)
+                if quantity_comparison.empty:
                     st.info("No hay cantidades comparables para el período y la unidad seleccionados.")
                 else:
                     st.plotly_chart(
