@@ -77,12 +77,15 @@ def _fechas_semanas(rangos: list, referencia: pd.Timestamp) -> list:
 
 # ── construcción de la base de datos de la curva ──────────────────────────
 def construir_base_curva(df_sem: pd.DataFrame | None, df_dia: pd.DataFrame | None,
-                         df_real_d: pd.DataFrame | None, fecha_corte) -> dict | None:
+                         df_real_d: pd.DataFrame | None, fecha_corte,
+                         fecha_referencia=None) -> dict | None:
     """
     df_sem    : calcular_curva_s_semanal  -> semana_label, semana_rango, acumulado (%)
     df_dia    : calcular_curva_s_diaria   -> fecha, acumulado (%)
     df_real_d : calcular_curva_s_real_pyrevit(frecuencia='D', fecha_corte=...)
                 -> fecha, pct_ejecutado_acum (%) ; None/vacío si no hay real
+    fecha_referencia : fecha del calendario del Excel, solo para deducir el año
+                de los rangos de semana ('31-ago al 06-sep').
     """
     if (df_sem is None or df_sem.empty) and (df_dia is None or df_dia.empty):
         return None
@@ -108,7 +111,12 @@ def construir_base_curva(df_sem: pd.DataFrame | None, df_dia: pd.DataFrame | Non
 
     # ── SEMANAL ───────────────────────────────────────────────────────────
     if df_sem is not None and not df_sem.empty:
-        ref = pd.to_datetime(df_dia["fecha"]).min() if (df_dia is not None and not df_dia.empty) else corte
+        if fecha_referencia is not None:      # p. ej. primera fecha del Avance Diario del Excel
+            ref = pd.Timestamp(fecha_referencia)
+        elif df_dia is not None and not df_dia.empty:
+            ref = pd.to_datetime(df_dia["fecha"]).min()
+        else:
+            ref = corte
         fechas = _fechas_semanas([_rango_semana(r) for r in df_sem["semana_rango"]], ref)
         filas, prev_p, prev_e = [], 0.0, 0.0
         for (_, w), (ini, fin) in zip(df_sem.iterrows(), fechas):
@@ -142,6 +150,7 @@ def construir_base_curva(df_sem: pd.DataFrame | None, df_dia: pd.DataFrame | Non
             cabo["semana_ev"] = filas[ev_idx]["n"]
             cabo["prog_sem"] = filas[ev_idx]["prog"]
             cabo["ev_sem"] = filas[ev_idx]["ev"]
+        cabo["prog_corte_sem"] = filas[sem_idx]["prog"]   # programado en la semana del corte
         cabo["semanas_evaluadas"] = sem_idx + 1
 
     # ── DIARIO ────────────────────────────────────────────────────────────
@@ -163,7 +172,7 @@ def construir_base_curva(df_sem: pd.DataFrame | None, df_dia: pd.DataFrame | Non
             cabo["ev_fecha"] = fechas_d[i_ev]
 
     # KPIs globales (prefiere lectura diaria si existe)
-    prog = cabo.get("prog_dia", cabo.get("prog_sem"))
+    prog = cabo.get("prog_dia", cabo.get("prog_corte_sem"))
     ev = cabo.get("ev_dia", cabo.get("ev_sem"))
     cabo["prog"], cabo["ev"] = prog, ev
     cabo["spi"] = (ev / prog) if (ev is not None and prog and prog > 0.01) else None
