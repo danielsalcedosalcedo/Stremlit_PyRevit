@@ -1200,11 +1200,24 @@ def render_dashboard(
                 if lb_pending is not None:
                     # Figura combinada: curva S (%) + barras de cantidad por período, en el lugar reservado
                     with lb_pending["slot"]:
+                        lb_c1, lb_c2 = st.columns(2)
+                        lb_show_bars = lb_c1.checkbox(
+                            "Mostrar avance físico (barras de cantidad)",
+                            value=True,
+                            key=f"{dashboard_key}_lb_bars_{frequency}",
+                        )
+                        lb_show_labels = lb_c2.checkbox(
+                            "Mostrar etiquetas de datos",
+                            value=True,
+                            key=f"{dashboard_key}_lb_labels_{frequency}",
+                        )
                         st.plotly_chart(
                             grafico_curva_lb_plotly(
                                 lb_pending["base"],
                                 modo=lb_pending["mode"],
                                 df_cantidades=quantity_comparison,
+                                mostrar_barras=lb_show_bars,
+                                etiquetas=lb_show_labels,
                             ),
                             use_container_width=True,
                             key=f"{dashboard_key}_lb_chart_{frequency}",
