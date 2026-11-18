@@ -1053,13 +1053,19 @@ def render_dashboard(
                             )
                         except Exception as exc:
                             st.warning(f"No fue posible calcular la curva real diaria: {exc}")
-                    ref_dates = (loaded["avance_diario"] or {}).get("fechas") or []
+                    # En vista semanal se pasa también el calendario diario del Excel: solo sirve
+                    # para deducir el año de los rangos de semana ("31-ago al 06-sep").
+                    excel_daily = pd.DataFrame()
+                    if frequency == "W" and loaded["avance_diario"]:
+                        try:
+                            excel_daily = calcular_curva_s_diaria(loaded["avance_diario"])
+                        except Exception:
+                            excel_daily = pd.DataFrame()
                     lb_base = construir_base_curva(
                         planned_curve if frequency == "W" else None,
-                        planned_curve if frequency == "D" else None,
+                        planned_curve if frequency == "D" else excel_daily,
                         real_daily,
                         pd.Timestamp(cutoff),
-                        fecha_referencia=min(ref_dates) if len(ref_dates) else None,
                     )
                     if lb_base is None:
                         st.info("No hay datos programados suficientes para esta vista.")
