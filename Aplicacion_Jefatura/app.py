@@ -65,7 +65,8 @@ st.markdown(
         background:#fff !important; color:var(--text) !important;
         font-family:'Montserrat',system-ui,sans-serif !important;
     }
-    .block-container {max-width:1320px; padding-top:.6rem; padding-bottom:2rem;}
+    .block-container {max-width:100% !important; padding-top:.6rem; padding-bottom:2rem;
+        padding-left:1rem !important; padding-right:1rem !important;}
     [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] {display:none;}
     [data-testid="stMetric"] {border:1px solid var(--border); border-radius:4px; padding:14px 16px; background:#fff;}
     [data-testid="stMetricLabel"] {color:var(--sub)!important; font-size:.72rem; font-weight:600; letter-spacing:.06em; text-transform:uppercase;}
@@ -1187,16 +1188,6 @@ def render_dashboard(
                                 use_container_width=True,
                                 hide_index=True,
                             )
-
-                # Gráfico de cantidades por período (siempre visible, también junto a la figura combinada)
-                if quantity_comparison.empty:
-                    st.info("No hay cantidades comparables para el período y la unidad seleccionados.")
-                else:
-                    st.plotly_chart(
-                        grafico_comparativo_cantidades_plotly(quantity_comparison),
-                        use_container_width=True,
-                        key=f"{dashboard_key}_period_comparison_{frequency}",
-                    )
         else:
             if not excel_file:
                 st.info(
