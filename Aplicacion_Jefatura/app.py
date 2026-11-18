@@ -1182,12 +1182,6 @@ def render_dashboard(
                             use_container_width=True,
                             key=f"{dashboard_key}_lb_chart_{frequency}",
                         )
-                        with st.expander("Tabla de valores (% acumulado)", expanded=False):
-                            st.dataframe(
-                                tabla_curva_lb(lb_pending["base"], lb_pending["mode"]),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
         else:
             if not excel_file:
                 st.info(
