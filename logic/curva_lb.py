@@ -215,7 +215,8 @@ def _barras_cantidad(df_cant: pd.DataFrame | None) -> list[dict]:
 
 
 def grafico_curva_lb_plotly(base: dict, modo: str = "sem", df_cantidades: pd.DataFrame | None = None,
-                            titulo: str | None = None) -> go.Figure:
+                            titulo: str | None = None, mostrar_barras: bool = True,
+                            etiquetas: bool = True) -> go.Figure:
     """
     Curva S (% programado y % real) + barras con la cantidad por período.
     modo = 'sem' (semanal) | 'dia' (diario)
@@ -223,7 +224,7 @@ def grafico_curva_lb_plotly(base: dict, modo: str = "sem", df_cantidades: pd.Dat
     """
     sem = modo == "sem"
     K = base["corte"]
-    barras = _barras_cantidad(df_cantidades)
+    barras = _barras_cantidad(df_cantidades) if mostrar_barras else []
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     # ── series de la curva, indexadas por clave de período ────────────────
@@ -264,27 +265,45 @@ def grafico_curva_lb_plotly(base: dict, modo: str = "sem", df_cantidades: pd.Dat
 
     prog = [prog_m.get(k) for k in x]
     ev = [ev_m.get(k) for k in x]
-    hover = [hov_m.get(k, "") for k in x]
+
+    # ── cantidades por período (para barras, etiquetas y hover) ───────────
+    cant = []  # [(barra, yp, yr)]
+    for b in barras:
+        if sem:
+            pm = {str(p): v for p, v in zip(b["periodos"], b["prog"])}
+            rm = {str(p): v for p, v in zip(b["periodos"], b["real"])}
+        else:
+            ks = pd.to_datetime(b["periodos"], format="%d-%m-%Y", errors="coerce").normalize()
+            pm, rm = dict(zip(ks, b["prog"])), dict(zip(ks, b["real"]))
+        cant.append((b, [pm.get(k) for k in x], [rm.get(k) for k in x]))
+
+    def _fq(v):
+        return "—" if v is None or pd.isna(v) else f"{v:,.2f}"
+
+    hover = []
+    for i, k in enumerate(x):
+        h = hov_m.get(k) or (f"<b>{k}</b>" if sem else f"<b>{_fdl(k)}</b>")
+        for b, yp, yr in cant:
+            h += (f"<br>Cantidad programada: {_fq(yp[i])} {b['etiqueta']}"
+                  f"<br>Cantidad real: {_fq(yr[i])} {b['etiqueta']}")
+        hover.append(h)
 
     # ── barras de cantidad (eje derecho, ocupan el tercio inferior) ───────
     if barras:
         bmax = 0.0
-        for b in barras:
-            if sem:
-                pm = {str(p): v for p, v in zip(b["periodos"], b["prog"])}
-                rm = {str(p): v for p, v in zip(b["periodos"], b["real"])}
-            else:
-                ks = pd.to_datetime(b["periodos"], format="%d-%m-%Y", errors="coerce").normalize()
-                pm, rm = dict(zip(ks, b["prog"])), dict(zip(ks, b["real"]))
-            yp, yr = [pm.get(k) for k in x], [rm.get(k) for k in x]
+        for b, yp, yr in cant:
             bmax = max(bmax, max([v or 0 for v in yp] + [v or 0 for v in yr] + [0]))
+            lp = [f"{v:,.0f}" if v else "" for v in yp] if etiquetas else None
+            lr = [f"{v:,.0f}" if v else "" for v in yr] if etiquetas else None
             fig.add_trace(go.Bar(x=x, y=yp, name=f"Cantidad programada · {b['etiqueta']}", marker_color=C_PROG,
-                                 opacity=.35, offsetgroup=f"p{b['unidad']}",
-                                 hovertemplate=f"%{{x}}<br>Programado: %{{y:,.2f}} {b['etiqueta']}<extra></extra>"),
+                                 opacity=.35, offsetgroup=f"p{b['unidad']}", text=lp, textposition="outside",
+                                 textfont=dict(color=C_PROG, size=9), cliponaxis=False,
+                                 hovertext=hover, hoverinfo="text"),
                           secondary_y=True)
             fig.add_trace(go.Bar(x=x, y=yr, name=f"Cantidad real · {b['etiqueta']}", marker_color=C_REAL,
-                                 opacity=.55, offsetgroup=f"r{b['unidad']}",
-                                 hovertemplate=f"%{{x}}<br>Real: %{{y:,.2f}} {b['etiqueta']}<extra></extra>"),
+                                 opacity=.55, offsetgroup=f"r{b['unidad']}", text=lr, textposition="outside",
+                                 textfont=dict(color=C_REAL, size=9), cliponaxis=False,
+                                 hovertext=hover, hoverinfo="text"),
                           secondary_y=True)
         bmax = (bmax * 1.15) or 1.0
         ticks = [round(bmax * i / 3, 2) for i in range(4)]
@@ -295,17 +314,27 @@ def grafico_curva_lb_plotly(base: dict, modo: str = "sem", df_cantidades: pd.Dat
     else:
         fig.update_yaxes(visible=False, secondary_y=True)
 
-    # ── curvas S ──────────────────────────────────────────────────────────
+    # ── curvas S (con etiquetas de % si se piden) ─────────────────────────
+    paso = 1 if sem else max(1, len(x) // 10)   # en diario, una etiqueta cada ~10 % del eje
+
+    def _etq(vals):
+        return [f"{v:.1f}%" if (v is not None and not pd.isna(v) and i % paso == 0) else ""
+                for i, v in enumerate(vals)]
+
+    base_mode = "lines+markers" if sem else "lines"
+    mode_c = base_mode + ("+text" if etiquetas else "")
     if base["tiene_real"]:
-        fig.add_trace(go.Scatter(x=x, y=ev, name="Real (PyRevit) · % acumulado",
-                                 mode="lines+markers" if sem else "lines",
+        fig.add_trace(go.Scatter(x=x, y=ev, name="Real (PyRevit) · % acumulado", mode=mode_c,
                                  line=dict(color=C_REAL, width=2.8 if sem else 2.4), marker=dict(size=5),
                                  fill="tozeroy", fillcolor="rgba(192,57,43,.06)", connectgaps=False,
-                                 text=hover, hoverinfo="text"), secondary_y=False)
-    fig.add_trace(go.Scatter(x=x, y=prog, name="Programado (Excel) · % acumulado",
-                             mode="lines+markers" if sem else "lines",
+                                 text=_etq(ev) if etiquetas else None, textposition="bottom right",
+                                 textfont=dict(color=C_REAL, size=9),
+                                 hovertext=hover, hoverinfo="text"), secondary_y=False)
+    fig.add_trace(go.Scatter(x=x, y=prog, name="Programado (Excel) · % acumulado", mode=mode_c,
                              line=dict(color=C_PROG, width=2.4 if sem else 2), marker=dict(size=5),
-                             connectgaps=False, text=hover, hoverinfo="text"), secondary_y=False)
+                             connectgaps=False, text=_etq(prog) if etiquetas else None,
+                             textposition="top left", textfont=dict(color=C_PROG, size=9),
+                             hovertext=hover, hoverinfo="text"), secondary_y=False)
 
     # ── línea de corte ────────────────────────────────────────────────────
     if sem:
@@ -345,8 +374,7 @@ def grafico_curva_lb_plotly(base: dict, modo: str = "sem", df_cantidades: pd.Dat
             text=f"<b>Desfase {ref}: {d:+.2f} pts</b><br><span style='font-size:10px'>{cuerpo}</span>",
             font=dict(color=dcol, size=13))
 
-    _apply_plotly_layout(fig, titulo or
-                         f"Curva S (% acumulado) y cantidad por período · {'Semanal' if sem else 'Diario'}")
+    _apply_plotly_layout(fig, titulo or f"Avance físico · Curva S · {'Semanal' if sem else 'Diario'}")
     fig.update_layout(height=500, barmode="group", bargap=.35, hovermode="closest",
                       margin=dict(l=55, r=60 if barras else 25, t=80, b=55))
     fig.update_yaxes(range=[0, 102], ticksuffix="%", dtick=20, secondary_y=False)
