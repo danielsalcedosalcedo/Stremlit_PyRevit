@@ -802,8 +802,8 @@ ESTADO_COLOR = {
     "done": "#2A7D4F", "sched": "#6B7A8C", "nodata": "#6B7A8C",
 }
 TIP_ESTADOS = (
-    "Ejecutada: 100 % real. En plazo: desvío mayor que −0,5 pts. En riesgo: entre −0,5 y −5 pts. "
-    "Atrasada: peor que −5 pts. Programada: aún sin avance previsto. Sin dato real: faltan elementos del modelo."
+    "Ejecutada: 100 % real. En plazo: desvío mayor que −0,5 %. En riesgo: entre −0,5 y −5 %. "
+    "Atrasada: peor que −5 %. Programada: aún sin avance previsto. Sin dato real: faltan elementos del modelo."
 )
 
 VIEWS = {
@@ -1312,8 +1312,8 @@ def _kpi_strip(bundle: dict, rows: pd.DataFrame) -> str:
                   tip="Avance que la obra debería llevar al corte según el Excel programado, ponderado por cantidad."),
         _kpi_cell("Real ejecutado", _fmt(pct_real), "%", f'{_fmt(qty["real"], 0)} {_esc(unit)}', color="var(--real)",
                   tip="Avance medido en el modelo BIM al corte, ponderado por cantidad."),
-        _kpi_cell("Desvío", _fmt(deviation, 1, signed=True), "pts", f"{pill} {dev_qty}", color=_dev_color(deviation),
-                  tip="Real menos programado, en puntos porcentuales (pts). Negativo indica atraso, positivo indica adelanto."),
+        _kpi_cell("Desvío", _fmt(deviation, 1, signed=True), "%", f"{pill} {dev_qty}", color=_dev_color(deviation),
+                  tip="Real menos programado, en %. Negativo indica atraso, positivo indica adelanto."),
         _kpi_cell("Partidas por estado", str(len(rows)), "partidas", "", tip=TIP_ESTADOS, tip_end=True,
                   extra=_stack_html(rows)),
         _kpi_cell("Alcance", _fmt(qty["total"], 0), unit, f'{qty["n"]} {"partida" if qty["n"] == 1 else "partidas"} en la vista',
@@ -1355,13 +1355,13 @@ def _lead_html(bundle: dict, rows: pd.DataFrame, frente: str, chosen_activity: d
     if status == "ok":
         first = f"{subject} va en plazo."
     else:
-        first = f'{subject} va {_fmt(abs(deviation))} puntos {"bajo" if status == "late" else "sobre"} lo programado.'
+        first = f'{subject} va {_fmt(abs(deviation))} % {"bajo" if status == "late" else "sobre"} lo programado.'
     second = ""
     if row is None:
         late = rows[(rows["desvio"].notna()) & (rows["desvio"] < -0.5)].sort_values("desvio") if not rows.empty else rows
         if not late.empty:
             worst = late.iloc[0]
-            second = f'La partida más atrasada es {worst["codigo"]} {worst["corto"]}, con {_fmt(abs(worst["desvio"]))} puntos de atraso.'
+            second = f'La partida más atrasada es {worst["codigo"]} {worst["corto"]}, con {_fmt(abs(worst["desvio"]))} % de atraso.'
             if len(late) > 1:
                 others = len(late) - 1
                 second += f' Otras {others} {"partida también está" if others == 1 else "partidas también están"} bajo lo programado.'
@@ -1384,7 +1384,7 @@ def _critical_html(rows: pd.DataFrame, limit: int = 6) -> str:
     for _, r in critical.iterrows():
         items.append(
             f'<div class="crit-row"><div class="n"><span class="c">{_esc(r["codigo"])}</span>{_esc(r["corto"])}</div>'
-            f'<div class="d">{_fmt(r["desvio"], 1, signed=True)} pts</div>'
+            f'<div class="d">{_fmt(r["desvio"], 1, signed=True)} %</div>'
             f'<div class="bar" role="img" aria-label="Real {_fmt(r["pct_real"], 0)} por ciento, programado {_fmt(r["pct_prog"], 0)} por ciento">'
             f'<i style="width:{r["pct_real"]:.1f}%"></i><b style="left:{(r["pct_prog"] or 0):.1f}%"></b></div></div>'
         )
@@ -1410,7 +1410,7 @@ def _ficha_body(payload: dict) -> None:
         '<div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr))">'
         + _kpi_cell("Programado al corte", _fmt(row["pct_prog"]), "%")
         + _kpi_cell("Real al corte", _fmt(row["pct_real"]), "%", color="var(--real)")
-        + _kpi_cell("Desvío", _fmt(deviation, 1, signed=True), "pts", color=_dev_color(deviation))
+        + _kpi_cell("Desvío", _fmt(deviation, 1, signed=True), "%", color=_dev_color(deviation))
         + _kpi_cell("Cantidad ejecutada", f'{_fmt(row["ejecutada"], 0)}', unit, f'de {_fmt(row["total"], 0)} {_esc(unit)}')
         + _kpi_cell("Inicio programado", start)
         + _kpi_cell("Término programado", end)
@@ -1550,7 +1550,7 @@ def _render_followup_table(rows: pd.DataFrame, *, dashboard_key: str, loaded: di
             "Estado": view["estado"].map(ESTADO_NOMBRE),
             "Programado (%)": view["pct_prog"],
             "Real (%)": view["pct_real"],
-            "Desvío (pts)": view["desvio"],
+            "Desvío (%)": view["desvio"],
             "Ejecutado": view["ejecutada"],
             "Total": view["total"],
             "Unidad": view["unidad"].replace({"kg": "Kg"}),
@@ -1571,11 +1571,11 @@ def _render_followup_table(rows: pd.DataFrame, *, dashboard_key: str, loaded: di
         paint = getattr(styler, "map", None) or styler.applymap  # `map` desde pandas 2.1
         styler = paint(_color_state, subset=["Estado"])
         paint = getattr(styler, "map", None) or styler.applymap
-        styler = paint(_color_dev, subset=["Desvío (pts)"])
+        styler = paint(_color_dev, subset=["Desvío (%)"])
         config = {
             "Programado (%)": st.column_config.NumberColumn(format="%.1f"),
             "Real (%)": st.column_config.ProgressColumn("Real (%)", min_value=0, max_value=100, format="%.1f"),
-            "Desvío (pts)": st.column_config.NumberColumn(format="%+.1f"),
+            "Desvío (%)": st.column_config.NumberColumn(format="%+.1f"),
             "Ejecutado": st.column_config.NumberColumn(format="%.2f"),
             "Total": st.column_config.NumberColumn(format="%.2f"),
         }
