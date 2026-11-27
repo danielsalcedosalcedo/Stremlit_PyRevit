@@ -229,6 +229,7 @@ ELECTRICIDAD_PYREVIT_CANDIDATES = (
 )
 SANITARIO_EXCEL_CANDIDATES = (ROOT_DIR / "data" / "programado" / "Sanitario_Avance.xlsx",)
 SANITARIO_PYREVIT_CANDIDATES = (
+    ROOT_DIR / "data" / "pyrevit_tuberias_elementos_detallados.json",
     ROOT_DIR / "data" / "pyrevit_sanitario_tuberias.json",
     ROOT_DIR / "data" / "pyrevit_sanitario_tuberias.csv",
 )
