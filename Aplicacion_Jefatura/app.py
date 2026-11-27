@@ -121,6 +121,7 @@ st.markdown(
     .nav-brand h1 {font-size:1.05rem; font-weight:600; line-height:1.25; margin:0; color:var(--navink);}
     .nav-brand p {font-size:.8rem; color:var(--navmute); margin:.2rem 0 0;}
     .nav-h {font-size:.78rem; color:var(--ink2); margin:0 0 .25rem; font-weight:500;}
+    .nav-txt {font-size:1rem; font-weight:600; color:var(--ink); padding:.35rem 0;}
 
     /* Cabecera de vista */
     .vhead {display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-end; gap:.4rem 1rem; margin:.2rem 0 .9rem;}
@@ -220,6 +221,22 @@ DEMOLICIONES_PYREVIT_CANDIDATES = (
 )
 HORMIGONES_PYREVIT_CANDIDATES = DEMOLICIONES_PYREVIT_CANDIDATES
 EEMM_IFC_DIRECTORY = ROOT_DIR / "data" / "Modelos IFC"
+# Electricidad, Sanitario y PCI: avance BIM desde exportaciones PyRevit de la categoría Tuberías y tubos.
+ELECTRICIDAD_EXCEL_CANDIDATES = (ROOT_DIR / "data" / "programado" / "Electricidad_Avance.xlsx",)
+ELECTRICIDAD_PYREVIT_CANDIDATES = (
+    ROOT_DIR / "data" / "pyrevit_electricidad_tuberias.json",
+    ROOT_DIR / "data" / "pyrevit_electricidad_tuberias.csv",
+)
+SANITARIO_EXCEL_CANDIDATES = (ROOT_DIR / "data" / "programado" / "Sanitario_Avance.xlsx",)
+SANITARIO_PYREVIT_CANDIDATES = (
+    ROOT_DIR / "data" / "pyrevit_sanitario_tuberias.json",
+    ROOT_DIR / "data" / "pyrevit_sanitario_tuberias.csv",
+)
+PCI_EXCEL_CANDIDATES = (ROOT_DIR / "data" / "programado" / "PCI_Avance.xlsx",)
+PCI_PYREVIT_CANDIDATES = (
+    ROOT_DIR / "data" / "pyrevit_pci_tuberias.json",
+    ROOT_DIR / "data" / "pyrevit_pci_tuberias.csv",
+)
 
 
 def _first_existing(paths: tuple[Path, ...]) -> Path | None:
@@ -244,6 +261,17 @@ def _load_ifc_data(
     )
 
 
+# Las hojas Datos de Electricidad, Sanitario y PCI usan EDT / Actividad / Inicio en lugar de ITEM / Nombre de tarea / Comienzo.
+_DATOS_RENAME = {"EDT": "ITEM", "Actividad": "Nombre de tarea", "Inicio": "Comienzo"}
+
+
+def _normalize_datos(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Unifica los nombres de columna de la hoja Datos para que todos los frentes usen las mismas claves."""
+    if df is None or "ITEM" in df.columns:
+        return df
+    return df.rename(columns={old: new for old, new in _DATOS_RENAME.items() if old in df.columns})
+
+
 @st.cache_data(show_spinner=False)
 def _load_local_data(
     excel_path: str | None,
@@ -266,7 +294,7 @@ def _load_local_data(
     if excel_path:
         try:
             hojas = load_excel_sheet_names(excel_path)
-            result["df_datos"] = load_datos_sheet(excel_path)
+            result["df_datos"] = _normalize_datos(load_datos_sheet(excel_path))
             if "Avance Semanal" in hojas:
                 result["avance_semanal"] = load_avance_semanal(excel_path)
             if "Avance Diario" in hojas:
@@ -828,6 +856,21 @@ FRENTES = {
         "dashboard_key": "eemm",
         "forced_unit": "kg",
         "ifc_directory": EEMM_IFC_DIRECTORY,
+    },
+    "Electricidad": {
+        "excel_candidates": ELECTRICIDAD_EXCEL_CANDIDATES,
+        "pyrevit_candidates": ELECTRICIDAD_PYREVIT_CANDIDATES,
+        "dashboard_key": "electricidad",
+    },
+    "Sanitario": {
+        "excel_candidates": SANITARIO_EXCEL_CANDIDATES,
+        "pyrevit_candidates": SANITARIO_PYREVIT_CANDIDATES,
+        "dashboard_key": "sanitario",
+    },
+    "PCI": {
+        "excel_candidates": PCI_EXCEL_CANDIDATES,
+        "pyrevit_candidates": PCI_PYREVIT_CANDIDATES,
+        "dashboard_key": "pci",
     },
 }
 
@@ -1949,36 +1992,8 @@ def render_dashboard(
             st.error(f"No se encontraron modelos IFC en {ifc_directory}.")
             return
 
-        session_key = f"{dashboard_key}_ifc_models"
-        if session_key not in st.session_state:
-            # Selecciona el modelo más liviano por defecto para agilizar la carga inicial
-            st.session_state[session_key] = [min(ifc_files, key=lambda path: path.stat().st_size)]
-
-        with _box():
-            _html('<div class="panel-h"><h3>Modelos IFC</h3><span>Elige uno o varios para consolidar el avance</span></div>')
-            col_multiselect, col_btn1, col_btn2 = st.columns([6, 1.5, 1.5])
-            with col_btn1:
-                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                if st.button("Marcar todos", key=f"{dashboard_key}_btn_all", **_STRETCH):
-                    st.session_state[session_key] = list(ifc_files)
-                    st.rerun()
-            with col_btn2:
-                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                if st.button("Limpiar", key=f"{dashboard_key}_btn_clear", **_STRETCH):
-                    st.session_state[session_key] = []
-                    st.rerun()
-            with col_multiselect:
-                selected_ifc_files = st.multiselect(
-                    "Modelos IFC (puedes seleccionar uno o varios)",
-                    options=ifc_files,
-                    format_func=lambda path: path.name,
-                    key=session_key,
-                    help="Elige uno o más archivos IFC para consolidar avance y visualización 3D.",
-                )
-
-        if not selected_ifc_files:
-            st.info("Selecciona al menos un archivo IFC para visualizar y analizar los datos de este frente.")
-            return
+        # Siempre se leen todos los modelos IFC de la carpeta; no hay selección manual.
+        selected_ifc_files = list(ifc_files)
 
     pyrevit_files = tuple(
         path for path in pyrevit_candidates if path.is_file() and path.stat().st_size > 0
@@ -2051,6 +2066,9 @@ def render_dashboard(
     filters_box = _box()
     selected_zone, selected_contractor = "Todas", "Todos"
 
+    if "assembly_code" not in raw_pyrevit.columns:
+        # Sin registros IFC cargados (p. ej. un modelo que no se pudo leer): alcance vacío, sin error.
+        raw_pyrevit = raw_pyrevit.assign(assembly_code=pd.Series(dtype="object"))
     if not loaded_ifc_models and ifc_directory is None:
         raw_pyrevit = raw_pyrevit[raw_pyrevit["assembly_code"].astype(str).str.strip().isin(excel_codes)].copy()
     elif excel_codes:
@@ -2201,8 +2219,9 @@ _html(
 )
 nav_view_col, nav_frente_col = st.columns([3, 2])
 with nav_view_col:
-    st.markdown('<div class="nav-h">Vista</div>', unsafe_allow_html=True)
-    selected_view = st.radio("Vista", list(VIEWS), key="nav_view", horizontal=True, label_visibility="collapsed")
+    # Vista fija: Planificación (texto, sin selector). Gerencia y BIM quedan en el código sin mostrarse.
+    selected_view = "Planificación"
+    st.markdown('<div class="nav-h">Vista</div><div class="nav-txt">Planificación</div>', unsafe_allow_html=True)
 with nav_frente_col:
     st.markdown('<div class="nav-h">Frente de obra</div>', unsafe_allow_html=True)
     selected_frente = st.radio("Frente de obra", list(FRENTES), key="nav_frente", horizontal=True, label_visibility="collapsed")
