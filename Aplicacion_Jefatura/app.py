@@ -72,7 +72,7 @@ st.set_page_config(
     page_title="Seguimiento BIM | El Trébol",
     page_icon="🔷",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ── Estilos ────────────────────────────────────────────────────────────────
@@ -114,6 +114,13 @@ st.markdown(
     .side-brand p {font-size:.8rem; color:var(--navmute); margin:.25rem 0 0;}
     .side-h {font-size:.8rem; color:var(--navmute) !important; margin:1.1rem 0 .25rem;}
     .side-foot {font-size:.8rem; color:var(--navmute) !important; border-top:1px solid var(--navline); padding-top:.7rem; margin-top:1.4rem;}
+    [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] {display:none !important;}
+
+    /* Navegación superior */
+    .nav-brand {background:var(--nav); color:var(--navink); padding:.9rem 1.1rem; border-radius:3px; margin-bottom:.9rem;}
+    .nav-brand h1 {font-size:1.05rem; font-weight:600; line-height:1.25; margin:0; color:var(--navink);}
+    .nav-brand p {font-size:.8rem; color:var(--navmute); margin:.2rem 0 0;}
+    .nav-h {font-size:.78rem; color:var(--ink2); margin:0 0 .25rem; font-weight:500;}
 
     /* Cabecera de vista */
     .vhead {display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-end; gap:.4rem 1rem; margin:.2rem 0 .9rem;}
@@ -1384,32 +1391,6 @@ def _critical_html(rows: pd.DataFrame, limit: int = 6) -> str:
     return "".join(items)
 
 
-# ── Filtros: limpiar y contar ──────────────────────────────────────────────
-_FILTER_SUFFIXES = ("zone", "contractor", "activity_W", "activity_D", "global_unit_W", "global_unit_D", "estado")
-
-
-def _clear_filters(dashboard_key: str) -> None:
-    for suffix in _FILTER_SUFFIXES:
-        st.session_state.pop(f"{dashboard_key}_{suffix}", None)
-
-
-def _active_filters(dashboard_key: str) -> list[str]:
-    state = st.session_state
-    active = []
-    if state.get(f"{dashboard_key}_zone", "Todas") != "Todas":
-        active.append(f'Zona {state[f"{dashboard_key}_zone"]}')
-    if state.get(f"{dashboard_key}_contractor", "Todos") != "Todos":
-        active.append(f'Subcontratista {state[f"{dashboard_key}_contractor"]}')
-    for freq in ("W", "D"):
-        activity = state.get(f"{dashboard_key}_activity_{freq}")
-        if activity:
-            active.append(f'Partida {activity["item"]}')
-            break
-    if state.get(f"{dashboard_key}_estado", "all") != "all":
-        active.append(f'Estado {ESTADO_NOMBRE.get(state[f"{dashboard_key}_estado"], "").lower()}')
-    return active
-
-
 # ── Ficha de partida ───────────────────────────────────────────────────────
 _dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
 
@@ -2066,25 +2047,9 @@ def render_dashboard(
         st.error("La exportación encontrada no contiene el campo de Código de montaje (assembly_code).")
         return
 
-    # ── Filtros (misma lógica de alcance del tablero) ──────────────────────
+    # Sin filtros de zona ni subcontratista: el alcance es el total del frente.
     filters_box = _box()
-    active = _active_filters(dashboard_key)
-    with filters_box:
-        col_zone, col_contractor, col_clear = st.columns([3, 3, 2])
-        with col_zone:
-            zone_values = sorted(raw_pyrevit["ei_zona"].dropna().astype(str).unique()) if "ei_zona" in raw_pyrevit else []
-            selected_zone = st.selectbox("Zona", ["Todas"] + zone_values, key=f"{dashboard_key}_zone")
-        with col_contractor:
-            contractor_values = sorted(raw_pyrevit["ei_subcontratista"].dropna().astype(str).unique()) if "ei_subcontratista" in raw_pyrevit else []
-            selected_contractor = st.selectbox(
-                "Subcontratista", ["Todos"] + contractor_values, key=f"{dashboard_key}_contractor",
-            )
-        with col_clear:
-            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-            st.button(
-                f"Limpiar filtros ({len(active)})", key=f"{dashboard_key}_clear", **_STRETCH,
-                disabled=not active, on_click=_clear_filters, args=(dashboard_key,),
-            )
+    selected_zone, selected_contractor = "Todas", "Todos"
 
     if not loaded_ifc_models and ifc_directory is None:
         raw_pyrevit = raw_pyrevit[raw_pyrevit["assembly_code"].astype(str).str.strip().isin(excel_codes)].copy()
@@ -2102,10 +2067,6 @@ def render_dashboard(
         )
 
     scope = raw_pyrevit.copy()
-    if selected_zone != "Todas" and "ei_zona" in scope.columns:
-        scope = scope[scope["ei_zona"].astype(str) == selected_zone]
-    if selected_contractor != "Todos" and "ei_subcontratista" in scope.columns:
-        scope = scope[scope["ei_subcontratista"].astype(str) == selected_contractor]
 
     as_of = _filtered_as_of(scope, cutoff)
     model_item_summary = _build_item_summary(scope, unit_override=forced_unit)
@@ -2234,19 +2195,17 @@ def render_dashboard(
 # ════════════════════════════════════════════════════════════════════════════
 #  PÁGINA
 # ════════════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    _html(
-        '<div class="side-brand"><h1>Boulevard Gastronómico Mall Plaza El Trébol</h1>'
-        "<p>Seguimiento y control del avance BIM</p></div>"
-    )
-    st.markdown('<div class="side-h">Vista</div>', unsafe_allow_html=True)
-    selected_view = st.radio("Vista", list(VIEWS), key="nav_view", label_visibility="collapsed")
-    st.markdown('<div class="side-h">Frente de obra</div>', unsafe_allow_html=True)
-    selected_frente = st.radio("Frente de obra", list(FRENTES), key="nav_frente", label_visibility="collapsed")
-    _html(
-        f'<div class="side-foot">Corte al <b>{date.today():%d-%m-%Y}</b><br>'
-        "Programado: Excel del proyecto.<br>Real: exportación BIM.</div>"
-    )
+_html(
+    '<div class="nav-brand"><h1>Boulevard Gastronómico Mall Plaza El Trébol</h1>'
+    "<p>Seguimiento y control del avance BIM</p></div>"
+)
+nav_view_col, nav_frente_col = st.columns([3, 2])
+with nav_view_col:
+    st.markdown('<div class="nav-h">Vista</div>', unsafe_allow_html=True)
+    selected_view = st.radio("Vista", list(VIEWS), key="nav_view", horizontal=True, label_visibility="collapsed")
+with nav_frente_col:
+    st.markdown('<div class="nav-h">Frente de obra</div>', unsafe_allow_html=True)
+    selected_frente = st.radio("Frente de obra", list(FRENTES), key="nav_frente", horizontal=True, label_visibility="collapsed")
 
 _html(
     f'<div class="vhead"><div><h2>{_esc(selected_view)}</h2>'
