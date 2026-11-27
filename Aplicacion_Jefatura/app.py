@@ -862,16 +862,19 @@ FRENTES = {
         "excel_candidates": ELECTRICIDAD_EXCEL_CANDIDATES,
         "pyrevit_candidates": ELECTRICIDAD_PYREVIT_CANDIDATES,
         "dashboard_key": "electricidad",
+        "forced_unit": "ml",
     },
     "Sanitario": {
         "excel_candidates": SANITARIO_EXCEL_CANDIDATES,
         "pyrevit_candidates": SANITARIO_PYREVIT_CANDIDATES,
         "dashboard_key": "sanitario",
+        "forced_unit": "ml",
     },
     "PCI": {
         "excel_candidates": PCI_EXCEL_CANDIDATES,
         "pyrevit_candidates": PCI_PYREVIT_CANDIDATES,
         "dashboard_key": "pci",
+        "forced_unit": "ml",
     },
 }
 
@@ -2059,6 +2062,12 @@ def render_dashboard(
 
     if raw_pyrevit is None:
         raw_pyrevit = pd.DataFrame()
+    if forced_unit == "ml" and "ml" in raw_pyrevit.columns:
+        # Tuberías: la medida es el metro lineal. El export marca m²/m³ en la columna unidad,
+        # así que se corrige aquí para que la detección del tablero use ml.
+        raw_pyrevit = raw_pyrevit.assign(
+            unidad="ml", **{col: 0.0 for col in ("m2", "m3") if col in raw_pyrevit.columns}
+        )
     if "assembly_code" not in raw_pyrevit.columns and ifc_directory is None:
         st.error("La exportación encontrada no contiene el campo de Código de montaje (assembly_code).")
         return
